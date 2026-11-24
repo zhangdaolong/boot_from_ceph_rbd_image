@@ -8,6 +8,10 @@
 
 [Sources]
   CephRbdDxe.c
+  CephRbdWire.c
+  CephRbdWire.h
+  CephRbdLayout.c
+  CephRbdLayout.h
 
 [Packages]
   MdePkg/MdePkg.dec
