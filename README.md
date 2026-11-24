@@ -1,0 +1,1 @@
+# boot_from_ceph_rbd_image
