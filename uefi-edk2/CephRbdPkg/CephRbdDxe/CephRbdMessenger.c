@@ -300,10 +300,18 @@ CephMsgrClassifyV1ConnectReply (
     return EFI_BAD_BUFFER_SIZE;
   }
 
+  if (((Reply->Tag == CEPH_MSGR_TAG_READY) ||
+       (Reply->Tag == CEPH_MSGR_TAG_SEQ) ||
+       (Reply->Tag == CEPH_MSGR_TAG_CHALLENGE_AUTH)) &&
+      ((Reply->Features & RequiredFeatures) != RequiredFeatures))
+  {
+    *Action = CephMsgrConnectRejected;
+    return EFI_UNSUPPORTED;
+  }
+
   switch (Reply->Tag) {
     case CEPH_MSGR_TAG_READY:
       if ((Reply->ProtocolVersion != ExpectedProtocolVersion) ||
-          ((Reply->Features & RequiredFeatures) != RequiredFeatures) ||
           (CurrentConnectSequence == MAX_UINT32) ||
           (Reply->ConnectSequence != CurrentConnectSequence + 1))
       {
@@ -340,6 +348,11 @@ CephMsgrClassifyV1ConnectReply (
       return EFI_SUCCESS;
 
     case CEPH_MSGR_TAG_CHALLENGE_AUTH:
+      if (Reply->AuthorizerLength == 0) {
+        *Action = CephMsgrConnectRejected;
+        return EFI_COMPROMISED_DATA;
+      }
+
       *Action = CephMsgrConnectNeedAuthorizerChallenge;
       return EFI_SUCCESS;
 

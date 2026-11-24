@@ -227,6 +227,26 @@ TestMessengerConnect(void)
            &reply, 0, 2, 7, &action) == EFI_SUCCESS);
   assert(action == CephMsgrConnectAckSequence);
 
+  WriteLe64(reply_wire + 1, 0);
+  assert(CephMsgrDecodeV1ConnectReply(
+           reply_wire, sizeof(reply_wire), &reply) == EFI_SUCCESS);
+  assert(CephMsgrClassifyV1ConnectReply(
+           &reply, 1, 2, 7, &action) == EFI_UNSUPPORTED);
+  assert(action == CephMsgrConnectRejected);
+
+  reply_wire[0] = CEPH_MSGR_TAG_CHALLENGE_AUTH;
+  WriteLe32(reply_wire + 21, 8);
+  assert(CephMsgrDecodeV1ConnectReply(
+           reply_wire, sizeof(reply_wire), &reply) == EFI_SUCCESS);
+  assert(CephMsgrClassifyV1ConnectReply(
+           &reply, 0, 2, 7, &action) == EFI_SUCCESS);
+  assert(action == CephMsgrConnectNeedAuthorizerChallenge);
+  WriteLe32(reply_wire + 21, 0);
+  assert(CephMsgrDecodeV1ConnectReply(
+           reply_wire, sizeof(reply_wire), &reply) == EFI_SUCCESS);
+  assert(CephMsgrClassifyV1ConnectReply(
+           &reply, 0, 2, 7, &action) == EFI_COMPROMISED_DATA);
+
   assert(CephMsgrDecodeV1ConnectReply(
            reply_wire, sizeof(reply_wire) - 1, &reply) == EFI_BAD_BUFFER_SIZE);
 }
