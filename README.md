@@ -1,78 +1,103 @@
-# Boot Linux directly from a Ceph RBD image
+# Direct Ceph RBD Firmware Boot
 
-This repository provides a practical PXE/iPXE boot design and an initramfs-tools prototype for Linux systems whose root filesystem lives on Ceph RBD.
+This repository is developing firmware-side paths that make a Ceph RBD image visible directly during UEFI or Legacy BIOS startup.
 
-## Key design decision
+> Status: this branch contains architecture, specifications, build scaffolding, and test procedures. The EDK II Ceph/RBD protocol implementation is work in progress and is not yet a drop-in firmware driver.
 
-UEFI and legacy BIOS firmware do not natively speak Ceph RBD. Rather than implementing a Ceph client in firmware, use firmware only to load iPXE, then fetch the Linux kernel and initramfs over HTTP(S). The initramfs brings up networking, maps the RBD image with the Linux `rbd` client, and mounts the root partition. This works with both UEFI and legacy BIOS PXE and keeps Ceph protocol/authentication in Linux.
+## Architecture
 
 ```text
-UEFI PXE / BIOS PXE
-        |
-        v
-      iPXE  -- DHCP --> boot configuration
-        |                  |
-        +-- HTTPS: kernel + initramfs
-                           |
-                           v
-       initramfs: NIC + IP + Ceph config/key + rbd kernel module
-                           |
-                           v
-          Ceph monitors (public network) --> RBD mapping
-                           |
-                           v
-                 /dev/rbd0pN --> switch_root
+UEFI firmware / BIOS second-stage loader
+  ├── NIC and IP stack
+  ├── CephX authentication
+  ├── Ceph monitor/OSD messenger
+  ├── RBD metadata and object mapping
+  └── Block device / boot loader interface
+             │
+             ▼
+        Ceph RBD image
+             │
+             ▼
+        OS root and boot chain
 ```
 
-An alternative is to export RBD through a dedicated iSCSI gateway and use iPXE `sanboot`. That makes the firmware stage see an iSCSI disk, not a native Ceph device; it adds a gateway and does not remove the need to plan multipath, authentication, and image ownership. The initramfs approach is the recommended starting point.
+UEFI firmware provides network and device abstractions, making EDK II the primary implementation target. Legacy BIOS has no standard equivalent, so its implementation uses a network Option ROM or a BIOS-loaded second-stage executable and an explicit block-device interface.
 
-## Boot flow
+## Supported MVP scope
 
-1. Configure DHCP/PXE to load an architecture-appropriate iPXE binary (UEFI x86-64 and BIOS require different binaries). For UEFI Secure Boot, use a trusted signed shim/GRUB/iPXE chain; an unsigned custom iPXE binary will not boot under Secure Boot.
-2. iPXE downloads the kernel and initramfs from an HTTP(S) boot server.
-3. The kernel command line uses `ip=dhcp` and identifies the image with `ceph_rbd=pool/image`. Do not put Ceph secrets in the command line.
-4. The initramfs configures the NIC and IP, loads the `rbd` module, and runs `scripts/local-top/ceph-rbd` (this prototype). `rbd map` creates `/dev/rbd0` and the kernel exposes its partition(s).
-5. The normal initramfs root-mount flow mounts the requested `root=` device and switches to the real root.
+The initial implementation intentionally restricts the protocol surface:
 
-## Prototype
+- x86-64 UEFI/OVMF
+- Ceph messengers and CephX
+- RBD format 2 metadata
+- fixed pool/image and monitor configuration
+- read-only block access for the first firmware release
+- GPT/ESP discovery for UEFI
+- Legacy BIOS option-ROM or second-stage loader as a separate implementation
 
-`scripts/local-top/ceph-rbd` is an initramfs-tools `local-top` hook. It expects these command-line arguments:
+The MVP does not initially implement arbitrary CRUSH discovery, every RBD feature flag, snapshots, writes, `FS-LOCK`, or hot network reconfiguration.
 
-- `ceph_rbd=pool/image` (required)
-- `ceph_id=boot` (optional; defaults to `boot`)
-- `ceph_conf=/etc/ceph/ceph.conf` (optional)
-- `ceph_keyring=/etc/ceph/ceph.client.boot.keyring` (optional; defaults based on `ceph_id`)
-- `ceph_rbd_device=/dev/rbd0` (optional; expected mapping path)
+## Repository layout
 
-Example iPXE script (adjust URLs, paths, and root partition):
-
-```ipxe
-#!ipxe
-dhcp
-kernel https://boot.example/vmlinuz ip=dhcp root=/dev/rbd0p1 ro ceph_rbd=images/node01 ceph_id=boot ceph_conf=/etc/ceph/ceph.conf ceph_keyring=/etc/ceph/ceph.client.boot.keyring
-initrd https://boot.example/initrd.img
-boot
+```text
+uefi-edk2/CephRbdBoot/    EDK II UEFI driver and block-I/O adapter
+bios/                     Legacy BIOS Option ROM/second-stage design and code
+config/                   Example Ceph and boot configuration
+scripts/                  Build and QEMU test helpers
+examples/libvirt/         libvirt/OVMF and SeaBIOS test-domain templates
 ```
 
-The initramfs must contain the hook, `rbd` and its dependencies, the `rbd` userspace utility, Ceph configuration/keyring, NIC firmware/modules, and the tools needed to bring up the network. The network must be usable before `local-top` runs. On Debian/Ubuntu with initramfs-tools, install the script into `/etc/initramfs-tools/scripts/local-top/ceph-rbd`, make it executable, include the required files/modules with initramfs-tools configuration, and rebuild the initramfs (for example, `update-initramfs -u`). Exact packaging steps vary by distribution and Ceph release.
+## UEFI implementation sequence
 
-The prototype assumes a single RBD mapping in the initramfs so that the requested device is predictable. Ensure `root=` names the correct filesystem partition (for example `/dev/rbd0p1`), or use `/dev/rbd0` for a filesystem directly on the image. Verify partition naming and discovery on the target kernel before rollout.
+1. Add an EDK II DXE driver package with `EFI_DRIVER_BINDING_PROTOCOL` and `EFI_BLOCK_IO2_PROTOCOL`.
+2. Bring up IPv4/IPv6 and TCP using UEFI network protocols.
+3. Implement the required Ceph messenger framing and CephX authentication.
+4. Query Monitor metadata and discover the RBD image and OSD map.
+5. Read RBD format 2 metadata and translate block ranges into ordered Ceph objects.
+6. Publish a read-only `EFI_BLOCK_IO_PROTOCOL` device and let UEFI Boot Manager discover ESP/GPT boot entries.
+7. Add OVMF-based positive and negative tests, firmware logs, and recovery behavior.
 
-## Ceph and security requirements
+Credentials must be stored using a firmware-specific protected or authenticated configuration mechanism. A Ceph key is never passed through an iPXE command line or guest kernel command line by this design.
 
-- The boot host must reach the Ceph monitors and OSD public network. Ensure DHCP provides the correct interface configuration, routes, and DNS if monitor names are used.
-- Provide a Ceph config with monitor addresses and a narrowly scoped CephX identity. Grant only the required pool/image permissions; avoid an administrative key.
-- This prototype stores the keyring in the initramfs. Treat the initramfs as a secret-bearing artifact, restrict its distribution, and use per-host or short-lived credentials where possible. For stronger isolation, fetch per-host credentials over authenticated HTTPS from a provisioning service.
-- Protect kernel/initramfs delivery with HTTPS and/or a verified Secure Boot chain. Secure Boot verifies the boot chain; it does not by itself encrypt the embedded keyring.
-- Do not let multiple hosts mount the same writable filesystem image unless the filesystem and storage design explicitly support it. Prefer one clone per host (often from a common snapshot); use read-only shared images only for suitable workloads.
-- Test failure handling, monitor changes, image resize/partition behavior, and reconnects. Production deployments should define an upgrade/rollback scheme for kernel, initramfs, and image snapshots.
+## Legacy BIOS implementation sequence
+
+1. Establish NIC discovery and UNDI/PXE-compatible network access, or provide a dedicated NIC Option ROM.
+2. Reuse the Ceph/RBD protocol core where language and memory constraints permit.
+3. Detect a BIOS boot image layout and expose the RBD block range through the loader's own internal block interface.
+4. Load the kernel/initramfs or BIOS boot sector and transfer control to the guest.
+5. Test with SeaBIOS/libvirt before any physical-NIC validation.
+
+The first Legacy BIOS target is a second-stage loader. A BIOS Option ROM requires substantially more ROM/RAM and firmware integration work and should be built only after the protocol core is stable.
+
+## Building and testing
+
+Requirements vary by EDK II release and Linux distribution. The repository will provide scripts for:
+
+- downloading or mounting an EDK II workspace
+- building the UEFI DXE/UEFI driver module
+- creating an OVMF test ROM/flash image
+- starting a libvirt or QEMU VM
+- validating GPT, ESP, and EFI executable discovery
+
+No physical BIOS, firmware image, or EDK II build tree should be committed to this repository. OVMF, EDK II, Ceph packages, and generated firmware binaries must remain host/build artifacts.
+
+## Existing guest-image prototype
+
+`scripts/local-top/ceph-rbd` remains an initramfs-tools prototype for a guest that starts first and maps RBD later. It is **not** firmware-side RBD boot and is not used by the UEFI or BIOS firmware paths.
+
+## Security
+
+- Restrict the CephX identity to the required pool and image operations.
+- Protect Ceph credentials and firmware configuration from unauthenticated updates.
+- Verify signed firmware and EFI executables with Secure Boot where supported.
+- Run the first boot tests from read-only clones or snapshots.
+- Do not share an ordinary writable filesystem across multiple firmware-started machines; use one RBD clone per host unless the guest filesystem explicitly supports cluster-wide access.
 
 ## Validation checklist
 
-1. Test in a VM first with the same firmware mode, NIC model, kernel, and initramfs.
-2. Confirm iPXE can fetch both artifacts and that the initramfs has working networking before the RBD hook runs.
-3. Confirm `rbd map` succeeds with the boot identity and that the expected `/dev/rbd0[pN]` appears.
-4. Confirm the filesystem mounts read-only for the first boot; then test the intended writable/clone strategy.
-5. Test both BIOS PXE and UEFI PXE independently. Firmware PXE binaries and Secure Boot behavior differ.
-
-This is a bootstrap prototype, not a drop-in distribution image builder. Production use requires distro-specific initramfs integration and testing against the exact Ceph/kernel versions.
+- OVMF starts the UEFI driver and identifies a Ceph-backed block device.
+- GPT partition discovery exposes the ESP.
+- UEFI can read and launch the EFI executable.
+- SeaBIOS or a second-stage loader reaches the Ceph Monitor and reads the RBD boot image.
+- Monitor/OSD failure and retry behavior is observable in firmware logs.
+- The image boot chain works with an equivalent read-only snapshot for repeatable tests.
