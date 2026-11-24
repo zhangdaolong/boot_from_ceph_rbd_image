@@ -1,0 +1,87 @@
+#!/bin/sh
+# initramfs-tools local-top hook: map a Ceph RBD image before mounting root.
+# Install as /etc/initramfs-tools/scripts/local-top/ceph-rbd and chmod +x.
+
+PREREQ=""
+
+prereqs() {
+    echo "$PREREQ"
+}
+
+case "${1:-}" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+fail() {
+    echo "ceph-rbd: ERROR: $*" >&2
+    if command -v panic >/dev/null 2>&1; then
+        panic "ceph-rbd: $*"
+    fi
+    exit 1
+}
+
+getarg() {
+    wanted="$1"
+    tr ' ' '\n' </proc/cmdline | while IFS= read -r arg; do
+        case "$arg" in
+            "$wanted"=*)
+                printf '%s\n' "${arg#*=}"
+                break
+                ;;
+        esac
+    done
+}
+
+image="$(getarg ceph_rbd)"
+[ -n "$image" ] || exit 0
+
+id="$(getarg ceph_id)"
+[ -n "$id" ] || id="boot"
+conf="$(getarg ceph_conf)"
+[ -n "$conf" ] || conf="/etc/ceph/ceph.conf"
+keyring="$(getarg ceph_keyring)"
+[ -n "$keyring" ] || keyring="/etc/ceph/ceph.client.${id}.keyring"
+expected_device="$(getarg ceph_rbd_device)"
+[ -n "$expected_device" ] || expected_device="/dev/rbd0"
+
+case "$image" in
+    */*) ;;
+    *) fail "ceph_rbd must be pool/image (got '$image')" ;;
+esac
+[ -r "$conf" ] || fail "Ceph config is not readable: $conf"
+[ -r "$keyring" ] || fail "Ceph keyring is not readable: $keyring"
+command -v rbd >/dev/null 2>&1 || fail "rbd userspace utility is missing from initramfs"
+command -v modprobe >/dev/null 2>&1 || fail "modprobe is missing from initramfs"
+
+# The initramfs must have configured networking (for example via ip=dhcp)
+# before local-top is reached.
+modprobe rbd || fail "could not load the rbd kernel module"
+
+mapped=""
+attempt=1
+while [ "$attempt" -le 3 ]; do
+    mapped="$(rbd -c "$conf" map --id "$id" --keyfile "$keyring" "$image" 2>&1)"
+    status=$?
+    if [ "$status" -eq 0 ]; then
+        break
+    fi
+    echo "ceph-rbd: map attempt $attempt failed: $mapped" >&2
+    [ "$attempt" -eq 3 ] || sleep 2
+    attempt=$((attempt + 1))
+done
+[ "$status" -eq 0 ] || fail "unable to map $image after $attempt attempts"
+
+# rbd map prints the mapped device path. Keep it visible for early-boot logs.
+echo "ceph-rbd: mapped $image as $mapped"
+[ "$mapped" = "$expected_device" ] || fail "mapped device is '$mapped', but ceph_rbd_device expects '$expected_device'; ensure this is the only mapping and set root= accordingly"
+
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle || true
+fi
+if command -v partx >/dev/null 2>&1; then
+    partx -a "$mapped" >/dev/null 2>&1 || true
+fi
+exit 0
