@@ -1,12 +1,15 @@
 ## CephRbdBoot EDK II package
 
-This directory is a build scaffold for the UEFI firmware-side Ceph RBD prototype.
+This directory contains the EDK II package and portable protocol helpers for the UEFI firmware-side Ceph RBD prototype.
 
-The current package intentionally exposes no end-to-end Ceph implementation yet. It defines the package layout and build entrypoint needed to add protocol parsing, block I/O, and OVMF tests in subsequent commits.
+The package is not yet an end-to-end Ceph implementation and does not publish an EFI Block I/O device. It currently provides:
 
 - `CephRbdPkg/CephRbdPkg.dec`: package declarations
 - `CephRbdPkg/CephRbdPkg.dsc`: package build description
 - `CephRbdPkg/CephRbdDxe/CephRbdDxe.inf`: driver module
-- `CephRbdPkg/CephRbdDxe/CephRbdDxe.c`: protocol and driver skeleton
+- `CephRbdPkg/CephRbdDxe/CephRbdMessenger.c`: bounded Ceph messenger v1 message-frame decoder and CRC32C checks
+- `CephRbdPkg/CephRbdDxe/CephRbdCephX.c`: CephX challenge/response payload codecs
+- `CephRbdPkg/CephRbdDxe/CephRbdFormat2.c`: normalized Format 2 metadata validation and object-name construction
+- `CephRbdPkg/CephRbdDxe/CephRbdDxe.c`: current DXE entrypoint placeholder
 
-Build with `scripts/build-edk2.sh <EDK2_WORKSPACE> <EDK2_PACKAGES_PATH>`.
+These helpers do not implement messenger connection negotiation, CephX cryptography or ticket handling, Monitor/OSD RPCs, Format 2 metadata RPCs, UEFI networking, or Block I/O publication. Run host tests with `sh tests/run-core-tests.sh`; build with `scripts/build-edk2.sh <EDK2_WORKSPACE> <EDK2_PACKAGES_PATH>`.

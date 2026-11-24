@@ -2,7 +2,7 @@
 
 This repository is developing firmware-side paths that make a Ceph RBD image visible directly during UEFI or Legacy BIOS startup.
 
-> Status: this branch contains architecture, specifications, build scaffolding, and test procedures. The EDK II Ceph/RBD protocol implementation is work in progress and is not yet a drop-in firmware driver.
+> Status: the repository now contains independently testable Ceph messenger v1 framing, CephX payload codecs, RBD Format 2 layout/object-name helpers, and a BIOS MBR partition-loader core. It is still not a bootable Ceph client: networking, CephX cryptography/tickets, Monitor/OSD sessions, RBD metadata RPCs, UEFI Block I/O publication, and BIOS PXE/control transfer remain incomplete.
 
 ## Architecture
 
@@ -40,11 +40,11 @@ The MVP does not initially implement arbitrary CRUSH discovery, every RBD featur
 ## Repository layout
 
 ```text
-uefi-edk2/CephRbdBoot/    EDK II UEFI driver and block-I/O adapter
+uefi-edk2/CephRbdPkg/     EDK II DXE package and protocol core
 bios/                     Legacy BIOS Option ROM/second-stage design and code
 config/                   Example Ceph and boot configuration
 scripts/                  Build and QEMU test helpers
-examples/libvirt/         libvirt/OVMF and SeaBIOS test-domain templates
+tests/                    Host-side protocol/layout/loader tests and vectors
 ```
 
 ## UEFI implementation sequence
@@ -80,6 +80,8 @@ Requirements vary by EDK II release and Linux distribution. The repository will 
 - validating GPT, ESP, and EFI executable discovery
 
 No physical BIOS, firmware image, or EDK II build tree should be committed to this repository. OVMF, EDK II, Ceph packages, and generated firmware binaries must remain host/build artifacts.
+
+Run the host-side parser/layout/BIOS-core tests with `sh tests/run-core-tests.sh`. Build the DXE package with `scripts/build-edk2.sh <EDK2_WORKSPACE> <PACKAGES_PATH>` after installing an EDK II workspace. An OVMF firmware-start smoke test can be run with `bash scripts/run-ovmf-ceph-rbd.sh [OVMF_CODE_FD] [KVM|TCG] [OVMF_VARS_FD]`; it uses a temporary copy of the variable store and does not load this driver or connect to a Ceph cluster. Neither host tests nor the OVMF smoke test substitute for an EDK II build or end-to-end boot.
 
 ## Existing guest-image prototype
 

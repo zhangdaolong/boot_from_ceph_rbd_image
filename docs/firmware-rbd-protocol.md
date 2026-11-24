@@ -4,7 +4,7 @@ This document separates the UEFI and BIOS firmware work into stable interfaces a
 
 ## Implementation status
 
-The package currently has bounds-checked little-endian wire cursor helpers and an RBD striping extent mapper. These are protocol building blocks only; they do **not** implement a Ceph connection, CephX authentication, Monitor/OSD messaging, RBD metadata negotiation, or a bootable Block I/O device. Do not deploy this code to boot a system.
+The package currently has bounds-checked little-endian wire cursors, a bounded Ceph messenger v1 message decoder, CephX payload codecs, and normalized RBD Format 2 layout/object-name helpers. The BIOS directory has an independently testable MBR partition loader core. These are protocol building blocks only; they do **not** implement network connections, CephX cryptography/ticket handling, Monitor/OSD RPCs, RBD metadata discovery, a bootable EFI Block I/O device, or BIOS PXE/control transfer. Do not deploy this code to boot a system.
 
 ## MVP operations
 
@@ -12,23 +12,27 @@ The package currently has bounds-checked little-endian wire cursor helpers and a
 |---|---:|---|
 | UEFI NIC discovery | Yes | Not implemented |
 | IPv4 TCP | Yes | Not implemented |
-| Ceph messenger framing/session | Yes | Not implemented |
-| CephX authentication | Yes | Not implemented; requires audited crypto and protocol compatibility tests |
+| Ceph messenger framing/session | Yes | Bounded v1 message decoder only; connection/session state is not implemented |
+| CephX authentication | Yes | Challenge/authenticate payload codecs only; secret-key crypto, tickets and authorizers are not implemented |
 | Monitor session | Yes | Not implemented |
 | OSD session | Yes | Not implemented |
-| RBD format 2 metadata | Yes | Not implemented |
-| RBD object extent mapping | Yes | Layout math helper only |
+| RBD format 2 metadata | Yes | Normalized metadata validation only; on-wire metadata RPCs are not implemented |
+| RBD object extent mapping | Yes | Implemented for validated plain and striping-v2 layouts |
 | GPT partition discovery | Yes | Not implemented |
 | Read block range | Yes | Not implemented |
 | Writes/flush | No | Out of MVP scope |
 
 ## Bounded wire cursor
 
-`CephRbdWire.c` provides safe little-endian integer reads, bounded byte copies, and skips. Every operation checks the remaining buffer length before advancing the cursor. These helpers are deliberately transport-neutral and do not assume a particular Ceph messenger version or message structure.
+`CephRbdWire.c` provides safe little-endian integer reads/writes, bounded byte copies, and skips. `CephRbdMessenger.c` decodes Ceph messenger v1 message frames, checks all aggregate payload lengths, validates header/front/middle/data CRC32C values using Ceph's zero-seed convention, rejects incomplete and signed frames, and exposes front/middle/data slices. It does not negotiate a connection or process tags other than message frames; it is not messenger v2 and does not establish a session.
+
+The sample monitor configuration uses the standard messenger v2 port (3300), while this decoder only handles v1 message frames. A complete client must implement v2 or explicitly negotiate/connect to a cluster endpoint with v1 enabled (typically port 6789); no transport is wired in yet.
+
+`CephRbdCephX.c` decodes the version-1 server challenge and response header, and encodes the version-3 authenticate payload with its nested ticket-blob encoding. Challenge-response computation and ticket decryption are deliberately outside this codec and have not yet been implemented; do not treat successful payload encoding as authentication.
 
 ## RBD striping map
 
-`CephRbdLayout.c` maps an image byte offset to one object extent using the format 2 layout tuple (image size, object size, stripe unit, stripe count). The caller must repeat the mapping for remaining bytes. Layout validation rejects zero values and object sizes that are not multiples of stripe unit. The helper does not parse RBD headers, resolve object names, discover OSDs, or fetch data.
+`CephRbdFormat2.c` accepts already-decoded metadata, validates image size/order/features and either the default layout or striping-v2 parameters, then constructs `<object-prefix>.<16-hex-digit-object-number>` names. `CephRbdLayout.c` maps an image byte offset to one object extent. These helpers do not parse OSD class-method replies, discover image IDs, resolve pools/OSDs, or fetch data.
 
 ## UEFI driver state machine
 
@@ -49,3 +53,5 @@ A future driver must expose media only after authentication and RBD metadata val
 - Fail closed on unsupported messenger features, image features, and striping layouts.
 
 See `tests/rbd-layout-vectors.md` for deterministic layout vectors.
+
+Run `sh tests/run-core-tests.sh` for native checks of wire bounds, CephX payload encoding, messenger frame integrity, Format 2 layout/object naming, and BIOS active-partition loading. These do not replace EDK II, OVMF, or Ceph interoperability testing.

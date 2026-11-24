@@ -10,8 +10,14 @@
   CephRbdDxe.c
   CephRbdWire.c
   CephRbdWire.h
+  CephRbdMessenger.c
+  CephRbdMessenger.h
+  CephRbdCephX.c
+  CephRbdCephX.h
   CephRbdLayout.c
   CephRbdLayout.h
+  CephRbdFormat2.c
+  CephRbdFormat2.h
 
 [Packages]
   MdePkg/MdePkg.dec
