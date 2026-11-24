@@ -13,7 +13,7 @@ The package currently has bounds-checked little-endian wire cursors, a bounded C
 | UEFI NIC discovery | Yes | Not implemented |
 | IPv4 TCP | Yes | Not implemented |
 | Ceph messenger framing/session | Yes | Bounded v1 message decoder only; connection/session state is not implemented |
-| CephX authentication | Yes | Challenge/authenticate payload codecs only; secret-key crypto, tickets and authorizers are not implemented |
+| CephX authentication | Yes | Challenge/request/ticket-request/authenticate/authorizer codecs only; secret-key crypto, ticket validation and authorizer verification are not implemented |
 | Monitor session | Yes | Not implemented |
 | OSD session | Yes | Not implemented |
 | RBD format 2 metadata | Yes | Normalized metadata validation only; on-wire metadata RPCs are not implemented |
@@ -28,7 +28,7 @@ The package currently has bounds-checked little-endian wire cursors, a bounded C
 
 The sample monitor configuration uses the standard messenger v2 port (3300), while this decoder only handles v1 message frames. A complete client must implement v2 or explicitly negotiate/connect to a cluster endpoint with v1 enabled (typically port 6789); no transport is wired in yet.
 
-`CephRbdCephX.c` decodes the version-1 server challenge and response header, and encodes the version-3 authenticate payload with its nested ticket-blob encoding. Challenge-response computation and ticket decryption are deliberately outside this codec and have not yet been implemented; do not treat successful payload encoding as authentication.
+`CephRbdCephX.c` parses version-1 server/authorizer challenges and response headers; encodes request headers, service-ticket requests, version-2 authorizer payloads, and version-3 authenticate payloads; and bounds optional connection-secret parsing. Challenge-response computation, ticket decryption/validation, and authorizer cryptography are deliberately not implemented; do not treat successful payload encoding as authentication.
 
 ## RBD striping map
 

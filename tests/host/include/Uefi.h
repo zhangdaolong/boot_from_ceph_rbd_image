@@ -17,12 +17,15 @@ typedef uint64_t UINT64;
 typedef size_t UINTN;
 typedef int32_t INT32;
 typedef char CHAR8;
+typedef uint8_t BOOLEAN;
 typedef void VOID;
 typedef int EFI_STATUS;
 
 #define MAX_UINT32 UINT32_MAX
 #define MAX_UINT64 UINT64_MAX
 #define MAX_UINTN SIZE_MAX
+#define TRUE 1
+#define FALSE 0
 
 #define EFI_SUCCESS 0
 #define EFI_INVALID_PARAMETER (-1)

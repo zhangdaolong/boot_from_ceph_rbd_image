@@ -8,8 +8,8 @@ The package is not yet an end-to-end Ceph implementation and does not publish an
 - `CephRbdPkg/CephRbdPkg.dsc`: package build description
 - `CephRbdPkg/CephRbdDxe/CephRbdDxe.inf`: driver module
 - `CephRbdPkg/CephRbdDxe/CephRbdMessenger.c`: Ceph messenger v1 connect codec/reply classifier, bounded message-frame decoder, and CRC32C checks
-- `CephRbdPkg/CephRbdDxe/CephRbdCephX.c`: CephX challenge/response payload codecs
+- `CephRbdPkg/CephRbdDxe/CephRbdCephX.c`: bounded CephX challenge, request, ticket-request, authenticate, and authorizer payload codecs
 - `CephRbdPkg/CephRbdDxe/CephRbdFormat2.c`: normalized Format 2 metadata validation and object-name construction
 - `CephRbdPkg/CephRbdDxe/CephRbdDxe.c`: current DXE entrypoint placeholder
 
-These helpers do not implement messenger connection negotiation, CephX cryptography or ticket handling, Monitor/OSD RPCs, Format 2 metadata RPCs, UEFI networking, or Block I/O publication. Run host tests with `sh tests/run-core-tests.sh`; build with `scripts/build-edk2.sh <EDK2_WORKSPACE> <EDK2_PACKAGES_PATH>`.
+These helpers do not implement messenger banner/TCP connection handling, CephX cryptography or ticket verification, Monitor/OSD RPCs, Format 2 metadata RPCs, UEFI networking, or Block I/O publication. Run host tests with `sh tests/run-core-tests.sh`; build with `scripts/build-edk2.sh <EDK2_WORKSPACE> <EDK2_PACKAGES_PATH>`.

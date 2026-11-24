@@ -29,9 +29,14 @@ static void
 TestWireAndCephX(void)
 {
   const uint8_t challenge_wire[] = { 1, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01 };
+  const uint8_t authorize_challenge_wire[] = { 1, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01 };
+  const uint8_t authorize_reply_wire[] = { 2, 0x09, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 'k', 'e', 'y' };
   const uint8_t ticket[] = { 0xaa, 0xbb, 0xcc };
   uint8_t encoded[64];
+  uint8_t connection_secret[8];
   CEPHX_SERVER_CHALLENGE challenge;
+  CEPHX_AUTHORIZE_CHALLENGE authorize_challenge;
+  CEPHX_AUTHORIZE_REPLY authorize_reply;
   CEPHX_RESPONSE_HEADER response;
   UINTN encoded_length = 0;
   const uint8_t response_wire[] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x00 };
@@ -45,6 +50,36 @@ TestWireAndCephX(void)
            response_wire, sizeof(response_wire), &response) == EFI_SUCCESS);
   assert(response.RequestType == CEPHX_REQUEST_GET_AUTH_SESSION_KEY);
   assert(response.Status == 0);
+
+  assert(CephXEncodeRequestHeader(
+           CEPHX_REQUEST_GET_AUTH_SESSION_KEY, encoded, sizeof(encoded),
+           &encoded_length) == EFI_SUCCESS);
+  assert(encoded_length == 2 && encoded[0] == 0 && encoded[1] == 1);
+  assert(CephXEncodeRequestHeader(
+           0x0300, encoded, sizeof(encoded), &encoded_length) == EFI_INVALID_PARAMETER);
+  assert(CephXEncodeServiceTicketRequest(
+           0x0c, encoded, sizeof(encoded), &encoded_length) == EFI_SUCCESS);
+  assert(encoded_length == 5 && encoded[0] == 1 && encoded[1] == 0x0c);
+
+  assert(CephXDecodeAuthorizeChallenge(
+           authorize_challenge_wire, sizeof(authorize_challenge_wire),
+           &authorize_challenge) == EFI_SUCCESS);
+  assert(authorize_challenge.ServerChallenge == UINT64_C(0x0102030405060708));
+  assert(CephXEncodeAuthorize(
+           0x11, TRUE, authorize_challenge.ServerChallenge + 1,
+           encoded, sizeof(encoded), &encoded_length) == EFI_SUCCESS);
+  assert(encoded_length == 18 && encoded[0] == 2 && encoded[9] == 1);
+  assert(encoded[10] == 9 && encoded[17] == 1);
+
+  assert(CephXDecodeAuthorizeReply(
+           authorize_reply_wire, sizeof(authorize_reply_wire),
+           &authorize_reply, connection_secret, sizeof(connection_secret)) == EFI_SUCCESS);
+  assert(authorize_reply.NoncePlusOne == 9);
+  assert(authorize_reply.ConnectionSecretLength == 3);
+  assert(memcmp(connection_secret, "key", 3) == 0);
+  assert(CephXDecodeAuthorizeReply(
+           authorize_reply_wire, sizeof(authorize_reply_wire),
+           &authorize_reply, connection_secret, 2) == EFI_BUFFER_TOO_SMALL);
 
   assert(CephXEncodeAuthenticate(
            0x1122334455667788ULL,
