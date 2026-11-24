@@ -5,5 +5,7 @@
 
 #define CopyMem(Destination, Source, Length) \
   memcpy((Destination), (Source), (Length))
+#define ZeroMem(Buffer, Length) memset((Buffer), 0, (Length))
+#define SetMem(Buffer, Length, Value) memset((Buffer), (Value), (Length))
 
 #endif

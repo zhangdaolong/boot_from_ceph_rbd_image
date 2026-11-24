@@ -4,7 +4,7 @@ This document separates the UEFI and BIOS firmware work into stable interfaces a
 
 ## Implementation status
 
-The package currently has bounds-checked little-endian wire cursors, a bounded Ceph messenger v1 message decoder, CephX payload codecs, and normalized RBD Format 2 layout/object-name helpers. The BIOS directory has an independently testable MBR partition loader core. These are protocol building blocks only; they do **not** implement network connections, CephX cryptography/ticket handling, Monitor/OSD RPCs, RBD metadata discovery, a bootable EFI Block I/O device, or BIOS PXE/control transfer. Do not deploy this code to boot a system.
+The package currently has bounds-checked little-endian wire cursors, a bounded Ceph messenger v1 message decoder, CephX payload codecs and AES-128 challenge-response, and normalized RBD Format 2 layout/object-name helpers. The BIOS directory has an independently testable MBR partition loader core. These are protocol building blocks only; they do **not** implement network connections, CephX ticket decryption/validation or authorizer verification, Monitor/OSD RPCs, RBD metadata discovery, a bootable EFI Block I/O device, or BIOS PXE/control transfer. Do not deploy this code to boot a system.
 
 ## MVP operations
 
@@ -13,7 +13,7 @@ The package currently has bounds-checked little-endian wire cursors, a bounded C
 | UEFI NIC discovery | Yes | Not implemented |
 | IPv4 TCP | Yes | Not implemented |
 | Ceph messenger framing/session | Yes | Bounded v1 message decoder only; connection/session state is not implemented |
-| CephX authentication | Yes | Challenge/request/ticket-request/authenticate/authorizer codecs only; secret-key crypto, ticket validation and authorizer verification are not implemented |
+| CephX authentication | Yes | AES-128-CBC challenge-response (Ceph `encode_encrypt` wrapper) and payload codecs are implemented; ticket decryption/validation and authorizer verification are not implemented |
 | Monitor session | Yes | Not implemented |
 | OSD session | Yes | Not implemented |
 | RBD format 2 metadata | Yes | Normalized metadata validation only; on-wire metadata RPCs are not implemented |
@@ -28,7 +28,7 @@ The package currently has bounds-checked little-endian wire cursors, a bounded C
 
 The sample monitor configuration uses the standard messenger v2 port (3300), while this decoder only handles v1 message frames. A complete client must implement v2 or explicitly negotiate/connect to a cluster endpoint with v1 enabled (typically port 6789); no transport is wired in yet.
 
-`CephRbdCephX.c` parses version-1 server/authorizer challenges and response headers; encodes request headers, service-ticket requests, version-2 authorizer payloads, and version-3 authenticate payloads; and bounds optional connection-secret parsing. Challenge-response computation, ticket decryption/validation, and authorizer cryptography are deliberately not implemented; do not treat successful payload encoding as authentication.
+`CephRbdCephX.c` parses version-1 server/authorizer challenges and response headers; encodes request headers, service-ticket requests, version-2 authorizer payloads, and version-3 authenticate payloads; bounds optional connection-secret parsing; and implements AES-128-CBC/PKCS#7 using Ceph's fixed IV and encrypted-payload wrapper for the challenge-response calculation. Only 16-byte AES keys are supported. AES-256-KRB5, ticket decryption/validation, and authorizer cryptography are not implemented; successful challenge-response calculation or payload encoding alone does not establish an authenticated session.
 
 ## RBD striping map
 
@@ -45,7 +45,7 @@ A future driver must expose media only after authentication and RBD metadata val
 
 ## Security and protocol compatibility requirements
 
-- Do not implement CephX cryptography from an informal description; use a vetted, compatible cryptographic implementation and test against supported Ceph releases.
+- Do not extend CephX cryptography from an informal description; use a vetted, compatible cryptographic implementation and test against supported Ceph releases.
 - Never log Ceph keys or messenger session keys.
 - Keep credentials in protected firmware storage and reject unauthenticated configuration updates.
 - Reject malformed monitor, OSD, and RBD metadata lengths; cap all allocations.
@@ -54,4 +54,4 @@ A future driver must expose media only after authentication and RBD metadata val
 
 See `tests/rbd-layout-vectors.md` for deterministic layout vectors.
 
-Run `sh tests/run-core-tests.sh` for native checks of wire bounds, CephX payload encoding, messenger frame integrity, Format 2 layout/object naming, and BIOS active-partition loading. These do not replace EDK II, OVMF, or Ceph interoperability testing.
+Run `sh tests/run-core-tests.sh` for native checks of wire bounds, CephX payload encoding and a fixed AES-128 challenge-response vector, messenger frame integrity, Format 2 layout/object naming, and BIOS active-partition loading. These do not replace EDK II, OVMF, or Ceph interoperability testing.

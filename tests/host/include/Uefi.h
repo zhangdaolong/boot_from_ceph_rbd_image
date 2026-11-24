@@ -36,6 +36,7 @@ typedef int EFI_STATUS;
 #define EFI_CRC_ERROR (-6)
 #define EFI_ABORTED (-7)
 #define EFI_ACCESS_DENIED (-8)
+#define EFI_OUT_OF_RESOURCES (-9)
 #define EFI_ERROR(Status) ((Status) != EFI_SUCCESS)
 
 static inline UINT64

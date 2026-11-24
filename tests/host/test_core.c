@@ -100,6 +100,50 @@ TestWireAndCephX(void)
 }
 
 static void
+TestCephXAes(void)
+{
+  static const UINT8 key[CEPHX_AES_KEY_SIZE] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f
+  };
+  static const UINT8 challenge[17] = {
+    1,
+    0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+    0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11
+  };
+  static const UINT8 expected_encrypted[] = {
+    0x20, 0x00, 0x00, 0x00,
+    0xa5, 0x51, 0x20, 0xbc, 0xd8, 0xab, 0x64, 0x59,
+    0xd0, 0xa1, 0x94, 0x1b, 0x16, 0xa0, 0x44, 0x15,
+    0x99, 0x12, 0xa2, 0xe7, 0xeb, 0x74, 0x03, 0x09,
+    0x34, 0x74, 0x67, 0x85, 0x09, 0xce, 0x11, 0xbf
+  };
+  UINT8 encoded[64];
+  UINTN encoded_length = 0;
+  UINT64 response = 0;
+
+  assert(CephXEncryptAes128Payload(
+           key, sizeof (key), challenge, sizeof (challenge),
+           encoded, sizeof (encoded), &encoded_length) == EFI_SUCCESS);
+  assert(encoded_length == sizeof (expected_encrypted));
+  assert(memcmp (encoded, expected_encrypted, sizeof (expected_encrypted)) == 0);
+  assert(CephXComputeAesChallengeResponse(
+           key, sizeof (key),
+           UINT64_C(0x0102030405060708),
+           UINT64_C(0x1122334455667788),
+           &response) == EFI_SUCCESS);
+  assert(response == UINT64_C(0xc57196d845237f05));
+
+  encoded_length = 99;
+  assert(CephXEncryptAes128Payload(
+           key, sizeof (key), challenge, sizeof (challenge),
+           encoded, 35, &encoded_length) == EFI_BUFFER_TOO_SMALL);
+  assert(encoded_length == 0);
+  assert(CephXComputeAesChallengeResponse(
+           key, sizeof (key) - 1, 1, 2, &response) == EFI_UNSUPPORTED);
+}
+
+static void
 TestMessenger(void)
 {
   static const uint8_t crc_vector[] = "123456789";
@@ -333,6 +377,7 @@ int
 main(void)
 {
   TestWireAndCephX();
+  TestCephXAes();
   TestMessenger();
   TestMessengerConnect();
   TestRbdFormat2();

@@ -1,6 +1,91 @@
 #include <Uefi.h>
+#include <Library/BaseCryptLib.h>
+#include <Library/BaseMemoryLib.h>
+#include <Library/MemoryAllocationLib.h>
 #include "CephRbdCephX.h"
 #include "CephRbdWire.h"
+
+#define CEPHX_AUTH_ENC_MAGIC  0xff009cad8826aa55ULL
+
+STATIC CONST UINT8  mCephAesIv[16] = {
+  'c', 'e', 'p', 'h', 's', 'a', 'g', 'e',
+  'y', 'u', 'd', 'a', 'g', 'r', 'e', 'g'
+};
+
+STATIC
+EFI_STATUS
+CephXAes128CbcEncrypt (
+  IN CONST UINT8  *Key,
+  IN CONST VOID   *Plaintext,
+  IN UINTN        PlaintextLength,
+  OUT VOID        *Ciphertext,
+  IN UINTN        CiphertextCapacity,
+  OUT UINTN       *CiphertextLength
+  )
+{
+  VOID     *AesContext;
+  UINT8    *Padded;
+  UINTN    PaddedLength;
+  UINTN    PaddingLength;
+  UINTN    AesContextSize;
+  BOOLEAN  Result;
+  EFI_STATUS Status;
+
+  if ((Key == NULL) || (Plaintext == NULL) || (Ciphertext == NULL) ||
+      (CiphertextLength == NULL) || (PlaintextLength == 0) ||
+      (PlaintextLength > CEPHX_MAX_ENCRYPTED_PAYLOAD) ||
+      (PlaintextLength > MAX_UINTN - 16))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *CiphertextLength = 0;
+  PaddingLength = 16 - (PlaintextLength & 15);
+  PaddedLength = PlaintextLength + PaddingLength;
+  if (CiphertextCapacity < PaddedLength) {
+    return EFI_BUFFER_TOO_SMALL;
+  }
+
+  AesContextSize = AesGetContextSize ();
+  if (AesContextSize == 0) {
+    return EFI_UNSUPPORTED;
+  }
+
+  AesContext = AllocateZeroPool (AesContextSize);
+  if (AesContext == NULL) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+
+  Padded = AllocatePool (PaddedLength);
+  if (Padded == NULL) {
+    ZeroMem (AesContext, AesContextSize);
+    FreePool (AesContext);
+    return EFI_OUT_OF_RESOURCES;
+  }
+
+  CopyMem (Padded, Plaintext, PlaintextLength);
+  SetMem (Padded + PlaintextLength, PaddingLength, (UINT8)PaddingLength);
+  Result = AesInit (AesContext, Key, 128);
+  if (Result) {
+    Result = AesCbcEncrypt (
+               AesContext,
+               Padded,
+               PaddedLength,
+               mCephAesIv,
+               (UINT8 *)Ciphertext);
+  }
+
+  Status = Result ? EFI_SUCCESS : EFI_UNSUPPORTED;
+  if (!EFI_ERROR (Status)) {
+    *CiphertextLength = PaddedLength;
+  }
+
+  ZeroMem (Padded, PaddedLength);
+  FreePool (Padded);
+  ZeroMem (AesContext, AesContextSize);
+  FreePool (AesContext);
+  return Status;
+}
 
 EFI_STATUS
 CephXDecodeServerChallenge (
@@ -374,5 +459,162 @@ CephXEncodeAuthenticate (
   }
 
   *EncodedLength = Writer.Written;
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephXEncryptAes128Payload (
+  IN CONST UINT8  *Key,
+  IN UINTN        KeyLength,
+  IN CONST VOID   *Payload,
+  IN UINTN        PayloadLength,
+  OUT VOID        *Buffer,
+  IN UINTN        BufferLength,
+  OUT UINTN       *EncodedLength
+  )
+{
+  CEPH_WIRE_WRITER  Writer;
+  EFI_STATUS        Status;
+  UINT8             Plaintext[CEPHX_MAX_ENCRYPTED_PAYLOAD];
+  UINT8             Ciphertext[CEPHX_MAX_ENCRYPTED_PAYLOAD];
+  UINTN             PlaintextLength;
+  UINTN             CiphertextLength;
+
+  if ((Key == NULL) || ((Payload == NULL) && (PayloadLength != 0)) ||
+      (Buffer == NULL) || (EncodedLength == NULL))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (KeyLength != CEPHX_AES_KEY_SIZE) {
+    return EFI_UNSUPPORTED;
+  }
+
+  if (PayloadLength > CEPHX_MAX_ENCRYPTED_PAYLOAD - 10) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *EncodedLength = 0;
+  PlaintextLength = 9 + PayloadLength;
+  Plaintext[0] = 1;
+  Plaintext[1] = (UINT8)CEPHX_AUTH_ENC_MAGIC;
+  Plaintext[2] = (UINT8)(CEPHX_AUTH_ENC_MAGIC >> 8);
+  Plaintext[3] = (UINT8)(CEPHX_AUTH_ENC_MAGIC >> 16);
+  Plaintext[4] = (UINT8)(CEPHX_AUTH_ENC_MAGIC >> 24);
+  Plaintext[5] = (UINT8)(CEPHX_AUTH_ENC_MAGIC >> 32);
+  Plaintext[6] = (UINT8)(CEPHX_AUTH_ENC_MAGIC >> 40);
+  Plaintext[7] = (UINT8)(CEPHX_AUTH_ENC_MAGIC >> 48);
+  Plaintext[8] = (UINT8)(CEPHX_AUTH_ENC_MAGIC >> 56);
+  if (PayloadLength != 0) {
+    CopyMem (Plaintext + 9, Payload, PayloadLength);
+  }
+  Status = CephXAes128CbcEncrypt (
+             Key,
+             Plaintext,
+             PlaintextLength,
+             Ciphertext,
+             sizeof (Ciphertext),
+             &CiphertextLength);
+  ZeroMem (Plaintext, sizeof (Plaintext));
+  if (EFI_ERROR (Status)) {
+    ZeroMem (Ciphertext, sizeof (Ciphertext));
+    return Status;
+  }
+
+  if (BufferLength < (4 + CiphertextLength)) {
+    ZeroMem (Ciphertext, sizeof (Ciphertext));
+    return EFI_BUFFER_TOO_SMALL;
+  }
+
+  Status = CephWireWriterInit (&Writer, Buffer, BufferLength);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, (UINT32)CiphertextLength);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteBytes (&Writer, Ciphertext, CiphertextLength);
+  }
+
+  ZeroMem (Ciphertext, sizeof (Ciphertext));
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  *EncodedLength = Writer.Written;
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephXComputeAesChallengeResponse (
+  IN CONST UINT8  *Key,
+  IN UINTN        KeyLength,
+  IN UINT64       ServerChallenge,
+  IN UINT64       ClientChallenge,
+  OUT UINT64      *ChallengeResponse
+  )
+{
+  CEPH_WIRE_WRITER  Writer;
+  CEPH_WIRE_CURSOR  Cursor;
+  EFI_STATUS        Status;
+  UINT8             Challenge[17];
+  UINT8             Encoded[64];
+  UINTN             EncodedLength;
+  UINT64            Word;
+  UINT64            Result;
+
+  if ((Key == NULL) || (ChallengeResponse == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (KeyLength != CEPHX_AES_KEY_SIZE) {
+    return EFI_UNSUPPORTED;
+  }
+
+  Status = CephWireWriterInit (&Writer, Challenge, sizeof (Challenge));
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteU8 (&Writer, 1);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe64 (&Writer, ServerChallenge);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe64 (&Writer, ClientChallenge);
+  }
+
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephXEncryptAes128Payload (
+             Key,
+             KeyLength,
+             Challenge,
+             sizeof (Challenge),
+             Encoded,
+             sizeof (Encoded),
+             &EncodedLength);
+  ZeroMem (Challenge, sizeof (Challenge));
+  if (EFI_ERROR (Status)) {
+    ZeroMem (Encoded, sizeof (Encoded));
+    return Status;
+  }
+
+  Status = CephWireInit (&Cursor, Encoded, EncodedLength);
+  Result = 0;
+  while (!EFI_ERROR (Status) && (Cursor.Remaining >= sizeof (Word))) {
+    Status = CephWireReadLe64 (&Cursor, &Word);
+    if (!EFI_ERROR (Status)) {
+      Result ^= Word;
+    }
+  }
+
+  ZeroMem (Encoded, sizeof (Encoded));
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  *ChallengeResponse = Result;
   return EFI_SUCCESS;
 }

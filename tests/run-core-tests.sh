@@ -15,11 +15,13 @@ cc -std=c11 -Wall -Wextra -Werror \
   -I"$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe" \
   -I"$repo_root/bios/stage2" \
   "$repo_root/tests/host/test_core.c" \
+  "$repo_root/tests/host/test_crypto.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdWire.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdMessenger.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdCephX.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdLayout.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdFormat2.c" \
   "$repo_root/bios/stage2/ceph_stage2.c" \
+  -lcrypto \
   -o "$test_binary"
 "$test_binary"

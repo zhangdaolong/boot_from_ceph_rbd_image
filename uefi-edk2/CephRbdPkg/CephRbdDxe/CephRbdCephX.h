@@ -6,6 +6,8 @@
 #define CEPHX_REQUEST_GET_AUTH_SESSION_KEY  0x0100
 #define CEPHX_REQUEST_GET_PRINCIPAL_KEY     0x0200
 #define CEPHX_REQUEST_GET_ROTATING_KEY      0x0400
+#define CEPHX_AES_KEY_SIZE                  16
+#define CEPHX_MAX_ENCRYPTED_PAYLOAD         4096
 
 typedef struct {
   UINT64  ServerChallenge;
@@ -92,6 +94,26 @@ CephXEncodeAuthenticate (
   OUT VOID         *Buffer,
   IN UINTN          BufferLength,
   OUT UINTN         *EncodedLength
+  );
+
+EFI_STATUS
+CephXEncryptAes128Payload (
+  IN CONST UINT8  *Key,
+  IN UINTN        KeyLength,
+  IN CONST VOID   *Payload,
+  IN UINTN        PayloadLength,
+  OUT VOID        *Buffer,
+  IN UINTN        BufferLength,
+  OUT UINTN       *EncodedLength
+  );
+
+EFI_STATUS
+CephXComputeAesChallengeResponse (
+  IN CONST UINT8  *Key,
+  IN UINTN        KeyLength,
+  IN UINT64       ServerChallenge,
+  IN UINT64       ClientChallenge,
+  OUT UINT64      *ChallengeResponse
   );
 
 #endif

@@ -22,11 +22,14 @@
 [Packages]
   MdePkg/MdePkg.dec
   MdeModulePkg/MdeModulePkg.dec
+  CryptoPkg/CryptoPkg.dec
 
 [LibraryClasses]
   BaseLib
   BaseMemoryLib
+  BaseCryptLib
   DebugLib
+  MemoryAllocationLib
   UefiBootServicesTableLib
   UefiDriverEntryPoint
   UefiLib
