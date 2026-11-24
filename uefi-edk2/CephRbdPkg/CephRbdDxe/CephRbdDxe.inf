@@ -1,0 +1,32 @@
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = CephRbdDxe
+  FILE_GUID                      = 7E99D6FD-22CA-4821-AC6F-D83A70F0AEAA
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 0.1
+  ENTRY_POINT                    = CephRbdDxeEntryPoint
+
+[Sources]
+  CephRbdDxe.c
+  CephRbdWire.c
+  CephRbdWire.h
+  CephRbdLayout.c
+  CephRbdLayout.h
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  UefiLib
+
+[Protocols]
+  gEfiLoadedImageProtocolGuid
+
+[Depex]
+  TRUE
