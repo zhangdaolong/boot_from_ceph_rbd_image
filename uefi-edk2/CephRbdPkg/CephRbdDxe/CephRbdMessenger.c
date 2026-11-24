@@ -1,5 +1,6 @@
 #include <Uefi.h>
 #include "CephRbdMessenger.h"
+#include "CephRbdWire.h"
 
 STATIC
 UINT16
@@ -168,4 +169,189 @@ CephMsgrDecodeV1Frame (
   Frame->Data            = Frame->Middle + MiddleLength;
   Frame->FooterFlags     = FooterFlags;
   return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephMsgrEncodeV1Connect (
+  IN UINT64       SupportedFeatures,
+  IN UINT32       HostType,
+  IN UINT32       GlobalSequence,
+  IN UINT32       ConnectSequence,
+  IN UINT32       ProtocolVersion,
+  IN UINT32       AuthorizerProtocol,
+  IN CONST VOID   *Authorizer,
+  IN UINT32       AuthorizerLength,
+  IN UINT8        Flags,
+  OUT VOID        *Buffer,
+  IN UINTN        BufferLength,
+  OUT UINTN       *EncodedLength
+  )
+{
+  CEPH_WIRE_WRITER  Writer;
+  EFI_STATUS        Status;
+  UINTN             RequiredLength;
+
+  if ((Buffer == NULL) || (EncodedLength == NULL) ||
+      ((Authorizer == NULL) && (AuthorizerLength != 0)) ||
+      (HostType == 0) || (ProtocolVersion == 0) ||
+      (AuthorizerLength > 4096))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *EncodedLength = 0;
+  RequiredLength = CEPH_MSGR_V1_CONNECT_SIZE + AuthorizerLength;
+  if (BufferLength < RequiredLength) {
+    return EFI_BUFFER_TOO_SMALL;
+  }
+
+  Status = CephWireWriterInit (&Writer, Buffer, BufferLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephWireWriteLe64 (&Writer, SupportedFeatures);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, HostType);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, GlobalSequence);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, ConnectSequence);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, ProtocolVersion);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, AuthorizerProtocol);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, AuthorizerLength);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteU8 (&Writer, Flags);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteBytes (&Writer, Authorizer, AuthorizerLength);
+  }
+
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  *EncodedLength = Writer.Written;
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephMsgrDecodeV1ConnectReply (
+  IN CONST VOID                   *Buffer,
+  IN UINTN                        BufferLength,
+  OUT CEPH_MSGR_V1_CONNECT_REPLY  *Reply
+  )
+{
+  CONST UINT8  *Bytes;
+
+  if ((Buffer == NULL) || (Reply == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (BufferLength != CEPH_MSGR_V1_CONNECT_REPLY_SIZE) {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+
+  Bytes = (CONST UINT8 *)Buffer;
+  Reply->Tag              = Bytes[0];
+  Reply->Features         = CephMsgrReadLe64 (Bytes + 1);
+  Reply->GlobalSequence   = CephMsgrReadLe32 (Bytes + 9);
+  Reply->ConnectSequence  = CephMsgrReadLe32 (Bytes + 13);
+  Reply->ProtocolVersion  = CephMsgrReadLe32 (Bytes + 17);
+  Reply->AuthorizerLength = CephMsgrReadLe32 (Bytes + 21);
+  Reply->Flags            = Bytes[25];
+  if (Reply->AuthorizerLength > 4096) {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephMsgrClassifyV1ConnectReply (
+  IN CONST CEPH_MSGR_V1_CONNECT_REPLY  *Reply,
+  IN UINT64                            RequiredFeatures,
+  IN UINT32                            ExpectedProtocolVersion,
+  IN UINT32                            CurrentConnectSequence,
+  OUT CEPH_MSGR_CONNECT_ACTION         *Action
+  )
+{
+  if ((Reply == NULL) || (Action == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (Reply->AuthorizerLength > 4096) {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+
+  switch (Reply->Tag) {
+    case CEPH_MSGR_TAG_READY:
+      if ((Reply->ProtocolVersion != ExpectedProtocolVersion) ||
+          ((Reply->Features & RequiredFeatures) != RequiredFeatures) ||
+          (CurrentConnectSequence == MAX_UINT32) ||
+          (Reply->ConnectSequence != CurrentConnectSequence + 1))
+      {
+        *Action = CephMsgrConnectRejected;
+        return EFI_UNSUPPORTED;
+      }
+
+      *Action = CephMsgrConnectReady;
+      return EFI_SUCCESS;
+
+    case CEPH_MSGR_TAG_RETRY_SESSION:
+      if (Reply->ConnectSequence <= CurrentConnectSequence) {
+        *Action = CephMsgrConnectRejected;
+        return EFI_COMPROMISED_DATA;
+      }
+
+      *Action = CephMsgrConnectRetrySession;
+      return EFI_SUCCESS;
+
+    case CEPH_MSGR_TAG_RETRY_GLOBAL:
+      *Action = CephMsgrConnectRetryGlobal;
+      return EFI_SUCCESS;
+
+    case CEPH_MSGR_TAG_RESETSESSION:
+      *Action = CephMsgrConnectResetSession;
+      return EFI_SUCCESS;
+
+    case CEPH_MSGR_TAG_WAIT:
+      *Action = CephMsgrConnectWait;
+      return EFI_SUCCESS;
+
+    case CEPH_MSGR_TAG_SEQ:
+      *Action = CephMsgrConnectAckSequence;
+      return EFI_SUCCESS;
+
+    case CEPH_MSGR_TAG_CHALLENGE_AUTH:
+      *Action = CephMsgrConnectNeedAuthorizerChallenge;
+      return EFI_SUCCESS;
+
+    case CEPH_MSGR_TAG_FEATURES:
+    case CEPH_MSGR_TAG_BADPROTOVER:
+    case CEPH_MSGR_TAG_BADAUTHORIZER:
+    case CEPH_MSGR_TAG_CLOSE:
+      *Action = CephMsgrConnectRejected;
+      return EFI_ACCESS_DENIED;
+
+    default:
+      *Action = CephMsgrConnectRejected;
+      return EFI_UNSUPPORTED;
+  }
 }

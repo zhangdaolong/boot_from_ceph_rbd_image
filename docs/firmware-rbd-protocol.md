@@ -24,7 +24,7 @@ The package currently has bounds-checked little-endian wire cursors, a bounded C
 
 ## Bounded wire cursor
 
-`CephRbdWire.c` provides safe little-endian integer reads/writes, bounded byte copies, and skips. `CephRbdMessenger.c` decodes Ceph messenger v1 message frames, checks all aggregate payload lengths, validates header/front/middle/data CRC32C values using Ceph's zero-seed convention, rejects incomplete and signed frames, and exposes front/middle/data slices. It does not negotiate a connection or process tags other than message frames; it is not messenger v2 and does not establish a session.
+`CephRbdWire.c` provides safe little-endian integer reads/writes, bounded byte copies, and skips. `CephRbdMessenger.c` encodes/decodes the fixed Ceph messenger v1 connect records, bounds the optional authorizer bytes, classifies ready/retry/reset/wait responses, and decodes message frames with aggregate-length and CRC32C validation. It rejects incomplete and signed frames and exposes front/middle/data slices. It does not implement banner/address exchange, TCP, retries, or message sequence/ACK handling; it is not messenger v2 and does not establish a session.
 
 The sample monitor configuration uses the standard messenger v2 port (3300), while this decoder only handles v1 message frames. A complete client must implement v2 or explicitly negotiate/connect to a cluster endpoint with v1 enabled (typically port 6789); no transport is wired in yet.
 

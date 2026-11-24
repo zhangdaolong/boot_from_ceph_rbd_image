@@ -7,7 +7,7 @@ The package is not yet an end-to-end Ceph implementation and does not publish an
 - `CephRbdPkg/CephRbdPkg.dec`: package declarations
 - `CephRbdPkg/CephRbdPkg.dsc`: package build description
 - `CephRbdPkg/CephRbdDxe/CephRbdDxe.inf`: driver module
-- `CephRbdPkg/CephRbdDxe/CephRbdMessenger.c`: bounded Ceph messenger v1 message-frame decoder and CRC32C checks
+- `CephRbdPkg/CephRbdDxe/CephRbdMessenger.c`: Ceph messenger v1 connect codec/reply classifier, bounded message-frame decoder, and CRC32C checks
 - `CephRbdPkg/CephRbdDxe/CephRbdCephX.c`: CephX challenge/response payload codecs
 - `CephRbdPkg/CephRbdDxe/CephRbdFormat2.c`: normalized Format 2 metadata validation and object-name construction
 - `CephRbdPkg/CephRbdDxe/CephRbdDxe.c`: current DXE entrypoint placeholder

@@ -19,6 +19,13 @@ WriteLe32(uint8_t *Buffer, uint32_t Value)
 }
 
 static void
+WriteLe64(uint8_t *Buffer, uint64_t Value)
+{
+  WriteLe32(Buffer, (uint32_t)Value);
+  WriteLe32(Buffer + 4, (uint32_t)(Value >> 32));
+}
+
+static void
 TestWireAndCephX(void)
 {
   const uint8_t challenge_wire[] = { 1, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01 };
@@ -106,6 +113,90 @@ TestMessenger(void)
 }
 
 static void
+TestMessengerConnect(void)
+{
+  const uint8_t authorizer[] = { 0xa1, 0xb2 };
+  uint8_t connect[CEPH_MSGR_V1_CONNECT_SIZE + sizeof(authorizer)];
+  uint8_t reply_wire[CEPH_MSGR_V1_CONNECT_REPLY_SIZE] = { 0 };
+  UINTN encoded_length = 0;
+  CEPH_MSGR_V1_CONNECT_REPLY reply;
+  CEPH_MSGR_CONNECT_ACTION action;
+
+  assert(CephMsgrEncodeV1Connect(
+           0x1122334455667788ULL,
+           CEPH_MSGR_CONNECT_HOST_CLIENT,
+           0x01020304,
+           7,
+           2,
+           2,
+           authorizer,
+           sizeof(authorizer),
+           0,
+           connect,
+           sizeof(connect),
+           &encoded_length) == EFI_SUCCESS);
+  assert(encoded_length == sizeof(connect));
+  assert(connect[0] == 0x88 && connect[7] == 0x11);
+  assert(connect[8] == CEPH_MSGR_CONNECT_HOST_CLIENT);
+  assert(connect[28] == sizeof(authorizer));
+  assert(connect[CEPH_MSGR_V1_CONNECT_SIZE] == 0xa1);
+  assert(CephMsgrEncodeV1Connect(
+           0, CEPH_MSGR_CONNECT_HOST_CLIENT, 1, 1, 1, 0,
+           authorizer, sizeof(authorizer), 0,
+           connect, CEPH_MSGR_V1_CONNECT_SIZE, &encoded_length) == EFI_BUFFER_TOO_SMALL);
+
+  reply_wire[0] = CEPH_MSGR_TAG_READY;
+  WriteLe32(reply_wire + 17, 2);
+  WriteLe32(reply_wire + 13, 8);
+  assert(CephMsgrDecodeV1ConnectReply(
+           reply_wire, sizeof(reply_wire), &reply) == EFI_SUCCESS);
+  assert(CephMsgrClassifyV1ConnectReply(
+           &reply, 0, 2, 7, &action) == EFI_SUCCESS);
+  assert(action == CephMsgrConnectReady);
+
+  WriteLe32(reply_wire + 13, 9);
+  assert(CephMsgrDecodeV1ConnectReply(
+           reply_wire, sizeof(reply_wire), &reply) == EFI_SUCCESS);
+  assert(CephMsgrClassifyV1ConnectReply(
+           &reply, 0, 2, 7, &action) == EFI_UNSUPPORTED);
+  assert(action == CephMsgrConnectRejected);
+
+  reply_wire[0] = CEPH_MSGR_TAG_READY;
+  WriteLe32(reply_wire + 13, 8);
+  WriteLe64(reply_wire + 1, 0x1);
+  assert(CephMsgrDecodeV1ConnectReply(
+           reply_wire, sizeof(reply_wire), &reply) == EFI_SUCCESS);
+  assert(CephMsgrClassifyV1ConnectReply(
+           &reply, 0x3, 2, 7, &action) == EFI_UNSUPPORTED);
+  assert(action == CephMsgrConnectRejected);
+
+  reply_wire[0] = CEPH_MSGR_TAG_RETRY_SESSION;
+  WriteLe32(reply_wire + 13, 12);
+  assert(CephMsgrDecodeV1ConnectReply(
+           reply_wire, sizeof(reply_wire), &reply) == EFI_SUCCESS);
+  assert(CephMsgrClassifyV1ConnectReply(
+           &reply, 0, 2, 7, &action) == EFI_SUCCESS);
+  assert(action == CephMsgrConnectRetrySession);
+
+  WriteLe32(reply_wire + 13, 7);
+  assert(CephMsgrDecodeV1ConnectReply(
+           reply_wire, sizeof(reply_wire), &reply) == EFI_SUCCESS);
+  assert(CephMsgrClassifyV1ConnectReply(
+           &reply, 0, 2, 7, &action) == EFI_COMPROMISED_DATA);
+  assert(action == CephMsgrConnectRejected);
+
+  reply_wire[0] = CEPH_MSGR_TAG_SEQ;
+  assert(CephMsgrDecodeV1ConnectReply(
+           reply_wire, sizeof(reply_wire), &reply) == EFI_SUCCESS);
+  assert(CephMsgrClassifyV1ConnectReply(
+           &reply, 0, 2, 7, &action) == EFI_SUCCESS);
+  assert(action == CephMsgrConnectAckSequence);
+
+  assert(CephMsgrDecodeV1ConnectReply(
+           reply_wire, sizeof(reply_wire) - 1, &reply) == EFI_BAD_BUFFER_SIZE);
+}
+
+static void
 TestRbdFormat2(void)
 {
   CEPH_RBD_FORMAT2_METADATA metadata = {
@@ -188,6 +279,7 @@ main(void)
 {
   TestWireAndCephX();
   TestMessenger();
+  TestMessengerConnect();
   TestRbdFormat2();
   TestBiosStage2();
   puts("core firmware parser tests: passed");
