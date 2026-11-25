@@ -3,7 +3,10 @@
 #include <Library/DebugLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Protocol/BlockIo.h>
+#include <Protocol/DriverBinding.h>
 #include "CephRbdBlockIo.h"
+#include "CephRbdConfig.h"
+#include "CephRbdDxe.h"
 #include "CephRbdMsgrV1Recovery.h"
 
 #define CEPH_RBD_DRIVER_MEDIA_ID  0x43455048
@@ -28,9 +31,41 @@ typedef struct {
   CEPH_RBD_MSGR_V1_CONNECT_CONFIG  ConnectConfig;
   EFI_HANDLE                   BlockIoHandle;
   UINT32                       MediaId;
+  BOOLEAN                      BlockIoInstalled;
 } CEPH_RBD_DRIVER;
 
 #define CEPH_RBD_DRIVER_SIGNATURE  0x52424443  // 'CDBR'
+
+// Firmware boots a single configured image, so one driver instance is enough.
+STATIC CEPH_RBD_DRIVER  mCephRbdDriver;
+
+STATIC EFI_STATUS EFIAPI CephRbdDriverBindingSupported (
+  IN EFI_DRIVER_BINDING_PROTOCOL  *This,
+  IN EFI_HANDLE                   ControllerHandle,
+  IN EFI_DEVICE_PATH_PROTOCOL     *RemainingDevicePath OPTIONAL
+  );
+
+STATIC EFI_STATUS EFIAPI CephRbdDriverBindingStart (
+  IN EFI_DRIVER_BINDING_PROTOCOL  *This,
+  IN EFI_HANDLE                   ControllerHandle,
+  IN EFI_DEVICE_PATH_PROTOCOL     *RemainingDevicePath OPTIONAL
+  );
+
+STATIC EFI_STATUS EFIAPI CephRbdDriverBindingStop (
+  IN EFI_DRIVER_BINDING_PROTOCOL  *This,
+  IN EFI_HANDLE                   ControllerHandle,
+  IN UINTN                        NumberOfChildren,
+  IN EFI_HANDLE                   *ChildHandleBuffer OPTIONAL
+  );
+
+STATIC EFI_DRIVER_BINDING_PROTOCOL  mCephRbdDriverBinding = {
+  CephRbdDriverBindingSupported,
+  CephRbdDriverBindingStart,
+  CephRbdDriverBindingStop,
+  0x00000001,
+  NULL,
+  NULL
+};
 
 STATIC
 EFI_STATUS
@@ -220,6 +255,8 @@ CephRbdDriverInitialize (
       Driver->State = CephRbdStateFailed;
       return Status;
     }
+
+    Driver->BlockIoInstalled = TRUE;
   }
 
   Driver->State = CephRbdStateDeviceReady;
@@ -247,6 +284,125 @@ CephRbdDriverShutdown (
   return EFI_SUCCESS;
 }
 
+STATIC EFI_STATUS EFIAPI
+CephRbdDriverBindingSupported (
+  IN EFI_DRIVER_BINDING_PROTOCOL  *This,
+  IN EFI_HANDLE                   ControllerHandle,
+  IN EFI_DEVICE_PATH_PROTOCOL     *RemainingDevicePath OPTIONAL
+  )
+{
+  CEPH_RBD_CONFIG  Config;
+
+  if ((This == NULL) || (ControllerHandle == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  (VOID)RemainingDevicePath;
+  if (EFI_ERROR (CephRbdConfigLoad (&Config))) {
+    return EFI_UNSUPPORTED;
+  }
+
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS EFIAPI
+CephRbdDriverBindingStart (
+  IN EFI_DRIVER_BINDING_PROTOCOL  *This,
+  IN EFI_HANDLE                   ControllerHandle,
+  IN EFI_DEVICE_PATH_PROTOCOL     *RemainingDevicePath OPTIONAL
+  )
+{
+  CEPH_RBD_CONFIG                  Config;
+  CEPH_RBD_MSGR_V1_CONNECT_CONFIG  ConnectConfig;
+  EFI_STATUS                       Status;
+  UINTN                            Index;
+
+  if ((This == NULL) || (ControllerHandle == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  (VOID)RemainingDevicePath;
+  Status = CephRbdConfigLoad (&Config);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  // Try every configured monitor before giving up. This is simple failover:
+  // the first monitor that accepts the handshake and maps the image wins.
+  for (Index = 0; Index < Config.MonitorCount; Index++) {
+    ZeroMem (&ConnectConfig, sizeof (ConnectConfig));
+    ConnectConfig.ImageHandle = This->ImageHandle;
+    ConnectConfig.ControllerHandle = ControllerHandle;
+    ConnectConfig.RemoteAddress = Config.Monitors[Index].Address;
+    ConnectConfig.RemotePort = Config.Monitors[Index].Port;
+    ConnectConfig.SupportedFeatures = 0x0F;
+    ConnectConfig.RequiredFeatures = 0;
+    ConnectConfig.HostType = CEPH_MSGR_CONNECT_HOST_CLIENT;
+    ConnectConfig.ProtocolVersion = 6;
+    ConnectConfig.AuthorizerProtocol = 0;
+    ConnectConfig.Flags = 0;
+    ConnectConfig.TimeoutSeconds = 5;
+
+    Status = CephRbdDriverInitialize (
+               &mCephRbdDriver,
+               &ConnectConfig,
+               ControllerHandle,
+               Config.PoolId,
+               Config.ImageName,
+               Config.ImageNameLength,
+               Config.Fsid
+               );
+    if (!EFI_ERROR (Status)) {
+      return EFI_SUCCESS;
+    }
+
+    DEBUG ((DEBUG_ERROR,
+            "CephRbdDxe: monitor %u failed with %d, trying next\n",
+            (UINT32)Index,
+            (INT32)Status
+            ));
+    CephRbdDriverShutdown (&mCephRbdDriver);
+  }
+
+  return EFI_ERROR (Status) ? Status : EFI_NOT_FOUND;
+}
+
+STATIC EFI_STATUS EFIAPI
+CephRbdDriverBindingStop (
+  IN EFI_DRIVER_BINDING_PROTOCOL  *This,
+  IN EFI_HANDLE                   ControllerHandle,
+  IN UINTN                        NumberOfChildren,
+  IN EFI_HANDLE                   *ChildHandleBuffer OPTIONAL
+  )
+{
+  EFI_STATUS  Status;
+
+  if ((This == NULL) || (ControllerHandle == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  (VOID)NumberOfChildren;
+  (VOID)ChildHandleBuffer;
+  if (mCephRbdDriver.Signature != CEPH_RBD_DRIVER_SIGNATURE) {
+    return EFI_NOT_STARTED;
+  }
+
+  if (mCephRbdDriver.BlockIoInstalled && (gBS != NULL)) {
+    Status = gBS->UninstallProtocolInterface (
+                    mCephRbdDriver.BlockIoHandle,
+                    &gEfiBlockIoProtocolGuid,
+                    &mCephRbdDriver.BlockIo
+                    );
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+
+    mCephRbdDriver.BlockIoInstalled = FALSE;
+  }
+
+  return CephRbdDriverShutdown (&mCephRbdDriver);
+}
+
 EFI_STATUS
 EFIAPI
 CephRbdDxeEntryPoint (
@@ -254,9 +410,49 @@ CephRbdDxeEntryPoint (
   IN EFI_SYSTEM_TABLE  *SystemTable
   )
 {
-  (VOID)ImageHandle;
+  EFI_STATUS       Status;
+  EFI_HANDLE       BindingHandle;
+  CEPH_RBD_CONFIG  Config;
+
   (VOID)SystemTable;
   DEBUG ((DEBUG_INFO,
           "CephRbdDxe: firmware-side Ceph RBD boot driver\n"));
+
+  if (gBS == NULL) {
+    return EFI_UNSUPPORTED;
+  }
+
+  mCephRbdDriverBinding.ImageHandle = ImageHandle;
+  mCephRbdDriverBinding.DriverBindingHandle = ImageHandle;
+  BindingHandle = ImageHandle;
+  Status = gBS->InstallProtocolInterface (
+                  &BindingHandle,
+                  &gEfiDriverBindingProtocolGuid,
+                  EFI_NATIVE_INTERFACE,
+                  &mCephRbdDriverBinding
+                  );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  // Firmware that cannot enumerate a network controller can still map the
+  // configured image directly from the entry point.
+  if ((gRT != NULL) &&
+      !EFI_ERROR (CephRbdConfigLoad (&Config)) &&
+      ((Config.Flags & CEPH_RBD_CONFIG_FLAG_START_ON_ENTRY) != 0))
+  {
+    Status = CephRbdDriverBindingStart (
+               &mCephRbdDriverBinding,
+               ImageHandle,
+               NULL
+               );
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_ERROR,
+              "CephRbdDxe: entry-point mapping failed with %d\n",
+              (INT32)Status
+              ));
+    }
+  }
+
   return EFI_SUCCESS;
 }

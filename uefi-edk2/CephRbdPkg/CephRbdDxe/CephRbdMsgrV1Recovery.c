@@ -532,6 +532,7 @@ CephRbdMsgrV1ClientConnect (
   Client->GlobalSequence = 1;
   Client->ConnectSequence = 1;
   Client->ClientNonce = Config->ClientNonce;
+  Client->RecoveryConfig = Config;
 
   MaxAttempts = (Config->MaxConnectAttempts != 0) ?
                 Config->MaxConnectAttempts : CEPH_MSGR_V1_MAX_CONNECT_ATTEMPTS;
@@ -586,6 +587,7 @@ CephRbdMsgrV1ClientReconnect (
   }
 
   Client->ConnectSequence++;
+  Client->RecoveryConfig = Config;
   MaxAttempts = (Config->MaxConnectAttempts != 0) ?
                 Config->MaxConnectAttempts : CEPH_MSGR_V1_MAX_CONNECT_ATTEMPTS;
   if (MaxAttempts > CEPH_MSGR_V1_MAX_CONNECT_ATTEMPTS) {

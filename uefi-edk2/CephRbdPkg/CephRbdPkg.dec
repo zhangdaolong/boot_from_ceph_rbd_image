@@ -3,3 +3,7 @@
   PACKAGE_NAME                  = CephRbdPkg
   PACKAGE_GUID                  = 4F6B7F7D-3C39-4D74-AE2C-9AD7F9B2D7A1
   PACKAGE_VERSION               = 0.1
+
+[Guids]
+  ## Firmware configuration blob variable GUID
+  gCephRbdConfigGuid            = 9E5F1A2B-3C4D-4E5F-8A9B-0C1D2E3F4A5B

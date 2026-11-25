@@ -755,3 +755,220 @@ CephRpcCall (
 
   return EFI_TIMEOUT;
 }
+
+BOOLEAN
+CephRpcStatusIsRecoverable (
+  IN EFI_STATUS  Status
+  )
+{
+  switch (Status) {
+    case EFI_TIMEOUT:
+    case EFI_CONNECTION_FIN:
+    case EFI_DEVICE_ERROR:
+    case EFI_NOT_READY:
+      return TRUE;
+    default:
+      return FALSE;
+  }
+}
+
+EFI_STATUS
+CephRpcRunWithFailover (
+  IN UINTN            EndpointCount,
+  IN UINTN            MaxAttemptsPerEndpoint,
+  IN VOID             *Context,
+  IN CEPH_RPC_ATTEMPT  Attempt
+  )
+{
+  EFI_STATUS  Status;
+  EFI_STATUS  LastStatus;
+  UINTN       EndpointIndex;
+  UINTN       AttemptIndex;
+
+  if ((EndpointCount == 0) || (MaxAttemptsPerEndpoint == 0) ||
+      (Attempt == NULL))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  LastStatus = EFI_TIMEOUT;
+  for (EndpointIndex = 0; EndpointIndex < EndpointCount; EndpointIndex++) {
+    for (AttemptIndex = 0; AttemptIndex < MaxAttemptsPerEndpoint;
+         AttemptIndex++)
+    {
+      Status = Attempt (Context, EndpointIndex);
+      if (!EFI_ERROR (Status)) {
+        return EFI_SUCCESS;
+      }
+
+      LastStatus = Status;
+      if (!CephRpcStatusIsRecoverable (Status)) {
+        // A local/protocol error will not be fixed by retrying this endpoint.
+        break;
+      }
+    }
+  }
+
+  return LastStatus;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+CephRpcRecoveryAttempt (
+  IN VOID   *Context,
+  IN UINTN  EndpointIndex
+  )
+{
+  CEPH_RPC_RECOVERY_CONTEXT  *Recovery;
+  EFI_STATUS                 Status;
+
+  (VOID)EndpointIndex;
+  if (Context == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  Recovery = Context;
+  Recovery->AttemptIndex++;
+  if ((Recovery->AttemptIndex > 1) ||
+      (Recovery->Client == NULL) ||
+      (!Recovery->Client->Session.Ready))
+  {
+    if (Recovery->Client == NULL) {
+      return EFI_INVALID_PARAMETER;
+    }
+
+    if (Recovery->Client->Session.Ready) {
+      Status = CephRbdMsgrV1ClientReconnect (
+                 Recovery->Config,
+                 Recovery->Client
+                 );
+    } else {
+      Status = CephRbdMsgrV1ClientConnect (
+                 Recovery->Config,
+                 Recovery->Client
+                 );
+    }
+
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+  }
+
+  return CephRpcCall (
+           Recovery->Client,
+           Recovery->RequestType,
+           Recovery->ExpectedReplyType,
+           Recovery->Front,
+           Recovery->FrontLength,
+           Recovery->Data,
+           Recovery->DataLength,
+           Recovery->ReplyFront,
+           Recovery->ReplyFrontCapacity,
+           Recovery->ReplyFrontLength,
+           Recovery->ReplyData,
+           Recovery->ReplyDataCapacity,
+           Recovery->ReplyDataLength
+           );
+}
+
+EFI_STATUS
+CephRpcCallWithRecovery (
+  IN OUT CEPH_RBD_MSGR_V1_CLIENT               *Client,
+  IN     CONST CEPH_RBD_MSGR_V1_CONNECT_CONFIG *Config,
+  IN     UINT16                                 RequestType,
+  IN     UINT16                                 ExpectedReplyType,
+  IN     CONST VOID                             *Front,
+  IN     UINTN                                  FrontLength,
+  IN     CONST VOID                             *Data,  OPTIONAL
+  IN     UINTN                                  DataLength,
+  OUT    VOID                                   *ReplyFront,
+  IN     UINTN                                  ReplyFrontCapacity,
+  OUT    UINTN                                  *ReplyFrontLength,
+  OUT    VOID                                   *ReplyData,  OPTIONAL
+  IN     UINTN                                  ReplyDataCapacity,
+  OUT    UINTN                                  *ReplyDataLength  OPTIONAL
+  )
+{
+  CEPH_RPC_RECOVERY_CONTEXT  Recovery;
+
+  if ((Client == NULL) || (Config == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  ZeroMem (&Recovery, sizeof (Recovery));
+  Recovery.Client = Client;
+  Recovery.Config = Config;
+  Recovery.RequestType = RequestType;
+  Recovery.ExpectedReplyType = ExpectedReplyType;
+  Recovery.Front = Front;
+  Recovery.FrontLength = FrontLength;
+  Recovery.Data = Data;
+  Recovery.DataLength = DataLength;
+  Recovery.ReplyFront = ReplyFront;
+  Recovery.ReplyFrontCapacity = ReplyFrontCapacity;
+  Recovery.ReplyFrontLength = ReplyFrontLength;
+  Recovery.ReplyData = ReplyData;
+  Recovery.ReplyDataCapacity = ReplyDataCapacity;
+  Recovery.ReplyDataLength = ReplyDataLength;
+
+  return CephRpcRunWithFailover (
+           1,
+           CEPH_RPC_MAX_RECOVERY_ATTEMPTS,
+           &Recovery,
+           CephRpcRecoveryAttempt
+           );
+}
+
+EFI_STATUS
+CephRpcCallAuto (
+  IN OUT CEPH_RBD_MSGR_V1_CLIENT  *Client,
+  IN UINT16                       RequestType,
+  IN UINT16                       ExpectedReplyType,
+  IN CONST VOID                   *Front,
+  IN UINTN                        FrontLength,
+  IN CONST VOID                   *Data,  OPTIONAL
+  IN UINTN                        DataLength,
+  OUT VOID                        *ReplyFront,
+  IN UINTN                        ReplyFrontCapacity,
+  OUT UINTN                       *ReplyFrontLength,
+  OUT VOID                        *ReplyData,  OPTIONAL
+  IN UINTN                        ReplyDataCapacity,
+  OUT UINTN                       *ReplyDataLength  OPTIONAL
+  )
+{
+  if ((Client == NULL) || (Client->RecoveryConfig == NULL)) {
+    return CephRpcCall (
+             Client,
+             RequestType,
+             ExpectedReplyType,
+             Front,
+             FrontLength,
+             Data,
+             DataLength,
+             ReplyFront,
+             ReplyFrontCapacity,
+             ReplyFrontLength,
+             ReplyData,
+             ReplyDataCapacity,
+             ReplyDataLength
+             );
+  }
+
+  return CephRpcCallWithRecovery (
+           Client,
+           Client->RecoveryConfig,
+           RequestType,
+           ExpectedReplyType,
+           Front,
+           FrontLength,
+           Data,
+           DataLength,
+           ReplyFront,
+           ReplyFrontCapacity,
+           ReplyFrontLength,
+           ReplyData,
+           ReplyDataCapacity,
+           ReplyDataLength
+           );
+}

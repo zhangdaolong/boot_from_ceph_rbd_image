@@ -8,6 +8,9 @@
 
 [Sources]
   CephRbdDxe.c
+  CephRbdDxe.h
+  CephRbdConfig.c
+  CephRbdConfig.h
   CephRbdWire.c
   CephRbdWire.h
   CephRbdMessenger.c
@@ -45,14 +48,19 @@
   DebugLib
   MemoryAllocationLib
   UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
   UefiDriverEntryPoint
   UefiLib
 
 [Protocols]
   gEfiBlockIoProtocolGuid
+  gEfiDriverBindingProtocolGuid
   gEfiLoadedImageProtocolGuid
   gEfiTcp4ProtocolGuid
   gEfiTcp4ServiceBindingProtocolGuid
+
+[Guids]
+  gCephRbdConfigGuid
 
 [Depex]
   TRUE

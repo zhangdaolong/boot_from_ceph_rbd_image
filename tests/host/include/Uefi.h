@@ -18,6 +18,7 @@ typedef uint64_t UINT64;
 typedef size_t UINTN;
 typedef int32_t INT32;
 typedef char CHAR8;
+typedef uint16_t CHAR16;
 typedef uint8_t BOOLEAN;
 typedef void VOID;
 typedef int EFI_STATUS;
@@ -114,9 +115,26 @@ struct _EFI_BOOT_SERVICES {
     IN UINTN InterfaceType,
     IN VOID *Interface
     );
+  EFI_STATUS (*UninstallProtocolInterface)(
+    IN EFI_HANDLE Handle,
+    IN CONST EFI_GUID *Protocol,
+    IN VOID *Interface
+    );
+};
+
+typedef struct _EFI_RUNTIME_SERVICES EFI_RUNTIME_SERVICES;
+struct _EFI_RUNTIME_SERVICES {
+  EFI_STATUS (*GetVariable)(
+    IN CONST CHAR16 *VariableName,
+    IN CONST EFI_GUID *VendorGuid,
+    OUT OPTIONAL UINT32 *Attributes,
+    IN OUT UINTN *DataSize,
+    OUT OPTIONAL VOID *Data
+    );
 };
 
 extern EFI_BOOT_SERVICES *gBS;
+extern EFI_RUNTIME_SERVICES *gRT;
 
 static inline UINT64
 LShiftU64(UINT64 Value, UINTN Shift)

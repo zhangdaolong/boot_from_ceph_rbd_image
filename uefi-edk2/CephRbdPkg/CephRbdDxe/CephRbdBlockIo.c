@@ -59,7 +59,7 @@ CephRbdBlockIoGetOsdMap (
     return Status;
   }
 
-  Status = CephRpcCall (
+  Status = CephRpcCallAuto (
              Client,
              CEPH_MSG_MON_GET_MAP,
              CEPH_MSG_OSD_MAP,
@@ -272,7 +272,7 @@ CephRbdBlockIoCallClassMethod (
     return Status;
   }
 
-  Status = CephRpcCall (
+  Status = CephRpcCallAuto (
              Client,
              CEPH_MSG_OSD_OP,
              CEPH_MSG_OSD_OPREPLY,
@@ -696,7 +696,7 @@ CephRbdBlockIoReadBlocks (
       return Status;
     }
 
-    Status = CephRpcCall (
+    Status = CephRpcCallAuto (
                Client,
                CEPH_MSG_OSD_OP,
                CEPH_MSG_OSD_OPREPLY,

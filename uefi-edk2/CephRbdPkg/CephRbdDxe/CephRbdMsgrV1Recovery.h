@@ -59,6 +59,9 @@ typedef struct {
   UINT8                     ConnectionSecret[64];
   UINTN                     ConnectionSecretLength;
   BOOLEAN                   Connected;
+  // Connect parameters are remembered so RPCs can reconnect and replay after
+  // a transport failure without the caller having to pass them again.
+  CONST CEPH_RBD_MSGR_V1_CONNECT_CONFIG  *RecoveryConfig;
 } CEPH_RBD_MSGR_V1_CLIENT;
 
 VOID

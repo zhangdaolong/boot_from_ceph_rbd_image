@@ -6,6 +6,7 @@
 #include <Protocol/BlockIo.h>
 #include <Protocol/ServiceBinding.h>
 #include <Protocol/Tcp4.h>
+#include <Protocol/DriverBinding.h>
 #include "CephRbdMsgrV1Handshake.h"
 #include "CephRbdMsgrV1Session.h"
 #include "CephRbdMsgrV1Transport.h"
@@ -128,8 +129,22 @@ static EFI_STATUS EFIAPI FakeInstallProtocolInterface(
   IN UINTN InterfaceType,
   IN VOID *Interface
   );
+static EFI_STATUS EFIAPI FakeUninstallProtocolInterface(
+  EFI_HANDLE Handle,
+  CONST EFI_GUID *Protocol,
+  VOID *Interface
+  );
 
 static EFI_HANDLE mBlockIoHandle;
+static EFI_DRIVER_BINDING_PROTOCOL *mTestDriverBinding;
+
+EFI_DRIVER_BINDING_PROTOCOL *
+GetTestDriverBinding (
+  VOID
+  )
+{
+  return mTestDriverBinding;
+}
 
 static EFI_BOOT_SERVICES   mBootServices = {
   FakeCreateEvent,
@@ -139,7 +154,8 @@ static EFI_BOOT_SERVICES   mBootServices = {
   FakeCloseEvent,
   FakeOpenProtocol,
   FakeCloseProtocol,
-  FakeInstallProtocolInterface
+  FakeInstallProtocolInterface,
+  FakeUninstallProtocolInterface
 };
 
 EFI_BOOT_SERVICES *gBS = &mBootServices;
@@ -424,11 +440,30 @@ FakeInstallProtocolInterface(
   IN VOID *Interface
   )
 {
-  (void)Protocol;
-  (void)InterfaceType;
-  (void)Interface;
   assert(Handle != NULL);
-  mBlockIoHandle = (Handle != NULL) ? *Handle : NULL;
+  if (Protocol == &gEfiDriverBindingProtocolGuid) {
+    mTestDriverBinding = (EFI_DRIVER_BINDING_PROTOCOL *)Interface;
+  } else {
+    mBlockIoHandle = (Handle != NULL) ? *Handle : NULL;
+  }
+
+  (void)InterfaceType;
+  return EFI_SUCCESS;
+}
+
+static EFI_STATUS EFIAPI
+FakeUninstallProtocolInterface(
+  EFI_HANDLE Handle,
+  CONST EFI_GUID *Protocol,
+  VOID *Interface
+  )
+{
+  (void)Handle;
+  if (Protocol == &gEfiDriverBindingProtocolGuid) {
+    mTestDriverBinding = NULL;
+  }
+
+  (void)Interface;
   return EFI_SUCCESS;
 }
 

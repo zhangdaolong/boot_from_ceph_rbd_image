@@ -132,6 +132,90 @@ CephRpcDecodeOsdOpReply (
   OUT CEPH_OSD_OP_REPLY  *Reply
   );
 
+// Reconnect/failover support. The generic runner is deliberately independent
+// of sockets so host tests can drive its retry policy with a fake attempt.
+#define CEPH_RPC_MAX_RECOVERY_ATTEMPTS  4
+
+typedef EFI_STATUS (EFIAPI *CEPH_RPC_ATTEMPT) (
+  IN VOID   *Context,
+  IN UINTN  EndpointIndex
+  );
+
+// Connection loss, timeouts and device errors are safe to retry; protocol or
+// credential errors are not.
+BOOLEAN
+CephRpcStatusIsRecoverable (
+  IN EFI_STATUS  Status
+  );
+
+// Call Attempt for each endpoint, retrying recoverable failures up to
+// MaxAttemptsPerEndpoint before moving to the next endpoint. A successful
+// attempt returns immediately; a hard error skips to the next endpoint.
+EFI_STATUS
+CephRpcRunWithFailover (
+  IN UINTN            EndpointCount,
+  IN UINTN            MaxAttemptsPerEndpoint,
+  IN VOID             *Context,
+  IN CEPH_RPC_ATTEMPT  Attempt
+  );
+
+typedef struct {
+  CEPH_RBD_MSGR_V1_CLIENT               *Client;
+  CONST CEPH_RBD_MSGR_V1_CONNECT_CONFIG *Config;
+  UINT16                                 RequestType;
+  UINT16                                 ExpectedReplyType;
+  CONST VOID                            *Front;
+  UINTN                                  FrontLength;
+  CONST VOID                            *Data;
+  UINTN                                  DataLength;
+  VOID                                  *ReplyFront;
+  UINTN                                  ReplyFrontCapacity;
+  UINTN                                 *ReplyFrontLength;
+  VOID                                  *ReplyData;
+  UINTN                                  ReplyDataCapacity;
+  UINTN                                 *ReplyDataLength;
+  UINTN                                  AttemptIndex;
+} CEPH_RPC_RECOVERY_CONTEXT;
+
+// Retry a single RPC after reconnecting on a recoverable failure, replaying
+// unacknowledged frames via the messenger reconnect path.
+EFI_STATUS
+CephRpcCallWithRecovery (
+  IN OUT CEPH_RBD_MSGR_V1_CLIENT               *Client,
+  IN     CONST CEPH_RBD_MSGR_V1_CONNECT_CONFIG *Config,
+  IN     UINT16                                 RequestType,
+  IN     UINT16                                 ExpectedReplyType,
+  IN     CONST VOID                             *Front,
+  IN     UINTN                                  FrontLength,
+  IN     CONST VOID                             *Data,  OPTIONAL
+  IN     UINTN                                  DataLength,
+  OUT    VOID                                   *ReplyFront,
+  IN     UINTN                                  ReplyFrontCapacity,
+  OUT    UINTN                                  *ReplyFrontLength,
+  OUT    VOID                                   *ReplyData,  OPTIONAL
+  IN     UINTN                                  ReplyDataCapacity,
+  OUT    UINTN                                  *ReplyDataLength  OPTIONAL
+  );
+
+// Same as CephRpcCall but automatically reconnects and retries when the
+// client carries a connect config (set by CephRbdMsgrV1ClientConnect).
+EFI_STATUS
+CephRpcCallAuto (
+  IN OUT CEPH_RBD_MSGR_V1_CLIENT  *Client,
+  IN UINT16                       RequestType,
+  IN UINT16                       ExpectedReplyType,
+  IN CONST VOID                   *Front,
+  IN UINTN                        FrontLength,
+  IN CONST VOID                   *Data,  OPTIONAL
+  IN UINTN                        DataLength,
+  OUT VOID                        *ReplyFront,
+  IN UINTN                        ReplyFrontCapacity,
+  OUT UINTN                       *ReplyFrontLength,
+  OUT VOID                        *ReplyData,  OPTIONAL
+  IN UINTN                        ReplyDataCapacity,
+  OUT UINTN                       *ReplyDataLength  OPTIONAL
+  );
+
 // Generic transaction: send a request frame and wait for a reply whose
 // transaction id and message type match. Processed control tags are handled
 // by the session layer. Final reply payload is copied into the caller buffer.

@@ -21,7 +21,9 @@ cc -std=c11 -Wall -Wextra -Werror \
   "$repo_root/tests/host/test_recovery.c" \
   "$repo_root/tests/host/test_rpc.c" \
   "$repo_root/tests/host/test_blockio.c" \
+  "$repo_root/tests/host/test_config.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdWire.c" \
+  "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdConfig.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdMessenger.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdCephX.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdMsgrV1Handshake.c" \

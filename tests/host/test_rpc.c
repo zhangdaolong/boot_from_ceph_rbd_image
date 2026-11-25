@@ -199,11 +199,83 @@ TestOsdOpCodecs (VOID)
   assert(ClassLen == 3);
 }
 
+typedef struct {
+  EFI_STATUS  Status[4][4];
+  UINTN       Calls[4];
+} FAKE_FAILOVER;
+
+static EFI_STATUS EFIAPI
+FakeFailoverAttempt (
+  IN VOID   *Context,
+  IN UINTN  EndpointIndex
+  )
+{
+  FAKE_FAILOVER  *Fake;
+  EFI_STATUS      Status;
+  UINTN           Call;
+
+  if ((Context == NULL) || (EndpointIndex >= 4)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  Fake = Context;
+  Call = Fake->Calls[EndpointIndex]++;
+  Status = (Call < 4) ? Fake->Status[EndpointIndex][Call] : EFI_SUCCESS;
+  return Status;
+}
+
+static void
+TestRpcFailover (VOID)
+{
+  FAKE_FAILOVER  Fake;
+
+  assert(CephRpcStatusIsRecoverable (EFI_TIMEOUT) == TRUE);
+  assert(CephRpcStatusIsRecoverable (EFI_CONNECTION_FIN) == TRUE);
+  assert(CephRpcStatusIsRecoverable (EFI_DEVICE_ERROR) == TRUE);
+  assert(CephRpcStatusIsRecoverable (EFI_NOT_READY) == TRUE);
+  assert(CephRpcStatusIsRecoverable (EFI_ACCESS_DENIED) == FALSE);
+  assert(CephRpcStatusIsRecoverable (EFI_INVALID_PARAMETER) == FALSE);
+
+  memset (&Fake, 0, sizeof (Fake));
+  Fake.Status[0][0] = EFI_TIMEOUT;
+  Fake.Status[0][1] = EFI_DEVICE_ERROR;
+  assert(CephRpcRunWithFailover (
+           1, 3, &Fake, FakeFailoverAttempt) == EFI_SUCCESS);
+  assert(Fake.Calls[0] == 3);
+
+  // A hard error on the first monitor must not block the second one.
+  memset (&Fake, 0, sizeof (Fake));
+  Fake.Status[0][0] = EFI_ACCESS_DENIED;
+  assert(CephRpcRunWithFailover (
+           2, 2, &Fake, FakeFailoverAttempt) == EFI_SUCCESS);
+  assert(Fake.Calls[0] == 1);
+  assert(Fake.Calls[1] == 1);
+
+  // Exhausting every endpoint returns the last observed error.
+  memset (&Fake, 0, sizeof (Fake));
+  Fake.Status[0][0] = EFI_TIMEOUT;
+  Fake.Status[0][1] = EFI_TIMEOUT;
+  Fake.Status[1][0] = EFI_DEVICE_ERROR;
+  Fake.Status[1][1] = EFI_TIMEOUT;
+  assert(CephRpcRunWithFailover (
+           2, 2, &Fake, FakeFailoverAttempt) == EFI_TIMEOUT);
+  assert(Fake.Calls[0] == 2);
+  assert(Fake.Calls[1] == 2);
+
+  assert(CephRpcRunWithFailover (
+           0, 2, &Fake, FakeFailoverAttempt) == EFI_INVALID_PARAMETER);
+  assert(CephRpcRunWithFailover (
+           1, 0, &Fake, FakeFailoverAttempt) == EFI_INVALID_PARAMETER);
+  assert(CephRpcRunWithFailover (
+           1, 2, &Fake, NULL) == EFI_INVALID_PARAMETER);
+}
+
 VOID
 TestRpcCodecs (VOID)
 {
   TestMonCodecs ();
   TestOsdMapEpoch ();
   TestOsdOpCodecs ();
+  TestRpcFailover ();
   puts("RPC codec tests: passed");
 }

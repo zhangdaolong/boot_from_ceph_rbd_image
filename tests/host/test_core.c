@@ -15,6 +15,7 @@ void TestMessengerSession(void);
 void TestCephXAndRecovery(void);
 void TestRpcCodecs(void);
 void TestBlockIo(void);
+void TestConfigAndDriverBinding(void);
 
 static void
 WriteLe32(uint8_t *Buffer, uint32_t Value)
@@ -482,6 +483,7 @@ main(void)
   TestCephXAndRecovery();
   TestRpcCodecs();
   TestBlockIo();
+  TestConfigAndDriverBinding();
   puts("core firmware tests: passed");
   return 0;
 }
