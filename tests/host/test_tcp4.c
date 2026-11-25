@@ -6,6 +6,7 @@
 #include <Protocol/ServiceBinding.h>
 #include <Protocol/Tcp4.h>
 #include "CephRbdMsgrV1Handshake.h"
+#include "CephRbdMsgrV1Transport.h"
 #include "CephRbdTcp4.h"
 
 typedef struct {
@@ -620,4 +621,146 @@ TestTcp4AndMessengerHandshake(void)
   assert(CephRbdTcp4Close(&Connection, 2) == EFI_SUCCESS);
   assert(mDestroyChildCount == 5);
   assert(mCloseProtocolCount == 11);
+}
+
+void
+TestMessengerFrameTransport(void)
+{
+  EFI_IPv4_ADDRESS RemoteAddress = { { 10, 0, 0, 7 } };
+  CEPH_RBD_TCP4_CONNECTION Connection;
+  CEPH_MSGR_V1_FRAME Outgoing;
+  CEPH_MSGR_V1_FRAME Incoming;
+  UINT8 FrameBuffer[256];
+  UINT8 WireBuffer[256];
+  UINTN FrameLength;
+  UINTN WireLength;
+
+  ZeroMem (&Connection, sizeof (Connection));
+  assert(CephRbdTcp4Connect(
+           &mImage, &mController, &RemoteAddress, 6789, 2,
+           &Connection) == EFI_SUCCESS);
+
+  ZeroMem (&Outgoing, sizeof (Outgoing));
+  Outgoing.Sequence = 42;
+  Outgoing.TransactionId = 0x1234;
+  Outgoing.Type = 1;
+  Outgoing.Priority = 64;
+  Outgoing.Version = 1;
+  Outgoing.SourceType = CEPH_MSGR_CONNECT_HOST_CLIENT;
+  Outgoing.SourceNumber = 9;
+  Outgoing.CompatVersion = 1;
+  Outgoing.FrontLength = 5;
+  Outgoing.Front = (CONST UINT8 *)"front";
+
+  mSentLength = 0;
+  assert(CephMsgrV1SendFrame(
+           &Connection,
+           &Outgoing,
+           128,
+           2,
+           FrameBuffer,
+           sizeof (FrameBuffer),
+           &FrameLength
+           ) == EFI_SUCCESS);
+  assert(FrameLength == mSentLength);
+  assert(FrameLength > CEPH_MSGR_V1_HEADER_SIZE);
+  assert(CephMsgrDecodeV1Frame(
+           mSentBuffer,
+           mSentLength,
+           128,
+           &Incoming
+           ) == EFI_SUCCESS);
+  assert(Incoming.Sequence == 42);
+  assert(Incoming.TransactionId == 0x1234);
+  assert(Incoming.FrontLength == 5);
+  assert(memcmp (Incoming.Front, "front", 5) == 0);
+
+  ZeroMem (&Outgoing, sizeof (Outgoing));
+  Outgoing.Sequence = 43;
+  Outgoing.Type = 2;
+  Outgoing.Priority = 64;
+  Outgoing.Version = 1;
+  Outgoing.SourceType = CEPH_MSGR_CONNECT_HOST_CLIENT;
+  Outgoing.SourceNumber = 10;
+  Outgoing.CompatVersion = 1;
+  Outgoing.DataLength = 7;
+  Outgoing.Data = (CONST UINT8 *)"payload";
+  assert(CephMsgrEncodeV1Frame(
+           &Outgoing,
+           128,
+           WireBuffer,
+           sizeof (WireBuffer),
+           &WireLength
+           ) == EFI_SUCCESS);
+
+  mReceiveScript = WireBuffer;
+  mReceiveScriptLength = WireLength;
+  mReceiveScriptOffset = 0;
+  mReceiveMaxChunk = 13;
+  assert(CephMsgrV1ReceiveFrame(
+           &Connection,
+           128,
+           2,
+           FrameBuffer,
+           sizeof (FrameBuffer),
+           &Incoming,
+           &FrameLength
+           ) == EFI_SUCCESS);
+  assert(FrameLength == WireLength);
+  assert(Incoming.Sequence == 43);
+  assert(Incoming.DataLength == 7);
+  assert(memcmp (Incoming.Data, "payload", 7) == 0);
+  assert(mReceiveScriptOffset == WireLength);
+
+  {
+    UINT8 ControlTag = CEPH_MSGR_TAG_ACK;
+
+    mReceiveScript = &ControlTag;
+    mReceiveScriptLength = sizeof (ControlTag);
+    mReceiveScriptOffset = 0;
+    assert(CephMsgrV1ReceiveFrame(
+             &Connection,
+             128,
+             2,
+             FrameBuffer,
+             sizeof (FrameBuffer),
+             &Incoming,
+             &FrameLength
+             ) == EFI_UNSUPPORTED);
+    assert(mReceiveScriptOffset == 1);
+  }
+
+  mReceiveScript = WireBuffer;
+  mReceiveScriptLength = WireLength;
+  WireBuffer[10] ^= 0x01;
+  mReceiveScriptOffset = 0;
+  assert(CephMsgrV1ReceiveFrame(
+           &Connection,
+           128,
+           2,
+           FrameBuffer,
+           sizeof (FrameBuffer),
+           &Incoming,
+           &FrameLength
+           ) == EFI_CRC_ERROR);
+  assert(mReceiveScriptOffset == 1 + CEPH_MSGR_V1_HEADER_SIZE);
+
+  WireBuffer[10] ^= 0x01;
+  mReceiveScriptOffset = 0;
+  assert(CephMsgrV1ReceiveFrame(
+           &Connection,
+           6,
+           2,
+           FrameBuffer,
+           sizeof (FrameBuffer),
+           &Incoming,
+           &FrameLength
+           ) == EFI_BAD_BUFFER_SIZE);
+  assert(mReceiveScriptOffset == 1 + CEPH_MSGR_V1_HEADER_SIZE);
+
+  mReceiveScript = NULL;
+  mReceiveScriptLength = 0;
+  mReceiveScriptOffset = 0;
+  mReceiveMaxChunk = 0;
+  assert(CephRbdTcp4Close(&Connection, 2) == EFI_SUCCESS);
 }

@@ -21,6 +21,7 @@ cc -std=c11 -Wall -Wextra -Werror \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdMessenger.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdCephX.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdMsgrV1Handshake.c" \
+  "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdMsgrV1Transport.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdTcp4.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdLayout.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdFormat2.c" \

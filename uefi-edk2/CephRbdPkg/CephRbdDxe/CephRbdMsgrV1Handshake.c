@@ -8,47 +8,6 @@ STATIC CONST UINT8 mCephMsgrV1Banner[] = "ceph v027";
 
 STATIC
 EFI_STATUS
-CephMsgrV1ReadExact (
-  IN CEPH_RBD_TCP4_CONNECTION  *Connection,
-  OUT VOID                     *Buffer,
-  IN UINTN                     Length,
-  IN UINT32                    TimeoutSeconds
-  )
-{
-  EFI_STATUS  Status;
-  UINTN       ReceivedLength;
-  UINTN       Offset;
-
-  Offset = 0;
-  while (Offset < Length) {
-    ReceivedLength = 0;
-    Status = CephRbdTcp4Receive (
-               Connection,
-               (UINT8 *)Buffer + Offset,
-               Length - Offset,
-               TimeoutSeconds,
-               &ReceivedLength
-               );
-    if (EFI_ERROR (Status)) {
-      return Status;
-    }
-
-    if (ReceivedLength == 0) {
-      return EFI_CONNECTION_FIN;
-    }
-
-    if (ReceivedLength > Length - Offset) {
-      return EFI_COMPROMISED_DATA;
-    }
-
-    Offset += ReceivedLength;
-  }
-
-  return EFI_SUCCESS;
-}
-
-STATIC
-EFI_STATUS
 CephMsgrV1ValidatePeerAddress (
   IN CONST UINT8           *Address,
   IN CONST EFI_IPv4_ADDRESS *ExpectedAddress,
@@ -129,7 +88,7 @@ CephMsgrV1ClientHandshake (
     return Status;
   }
 
-  Status = CephMsgrV1ReadExact (
+  Status = CephRbdTcp4ReceiveExact (
              Connection,
              BannerAndAddresses,
              sizeof (BannerAndAddresses),
@@ -198,7 +157,7 @@ CephMsgrV1ClientHandshake (
     return Status;
   }
 
-  Status = CephMsgrV1ReadExact (
+  Status = CephRbdTcp4ReceiveExact (
              Connection,
              ConnectReply,
              sizeof (ConnectReply),
@@ -224,7 +183,7 @@ CephMsgrV1ClientHandshake (
   }
 
   if (Negotiation->ConnectReply.AuthorizerLength != 0) {
-    Status = CephMsgrV1ReadExact (
+    Status = CephRbdTcp4ReceiveExact (
                Connection,
                Negotiation->AuthorizerReply,
                Negotiation->ConnectReply.AuthorizerLength,

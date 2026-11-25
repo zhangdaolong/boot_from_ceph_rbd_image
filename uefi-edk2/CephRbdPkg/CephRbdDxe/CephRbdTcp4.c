@@ -398,6 +398,58 @@ CephRbdTcp4Receive (
 }
 
 EFI_STATUS
+CephRbdTcp4ReceiveExact (
+  IN CEPH_RBD_TCP4_CONNECTION  *Connection,
+  OUT VOID                     *Buffer,
+  IN UINTN                     BufferLength,
+  IN UINT32                    TimeoutSeconds
+  )
+{
+  EFI_STATUS  Status;
+  UINTN       ReceivedLength;
+  UINTN       ReceiveCapacity;
+  UINTN       Offset;
+
+  if ((Connection == NULL) || (Buffer == NULL) ||
+      (BufferLength == 0) || (TimeoutSeconds == 0))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  Offset = 0;
+  while (Offset < BufferLength) {
+    ReceiveCapacity = BufferLength - Offset;
+    if (ReceiveCapacity > MAX_UINT32) {
+      ReceiveCapacity = MAX_UINT32;
+    }
+
+    ReceivedLength = 0;
+    Status = CephRbdTcp4Receive (
+               Connection,
+               (UINT8 *)Buffer + Offset,
+               ReceiveCapacity,
+               TimeoutSeconds,
+               &ReceivedLength
+               );
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+
+    if (ReceivedLength == 0) {
+      return EFI_CONNECTION_FIN;
+    }
+
+    if (ReceivedLength > ReceiveCapacity) {
+      return EFI_COMPROMISED_DATA;
+    }
+
+    Offset += ReceivedLength;
+  }
+
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS
 CephRbdTcp4Close (
   IN OUT CEPH_RBD_TCP4_CONNECTION  *Connection,
   IN UINT32                        TimeoutSeconds
