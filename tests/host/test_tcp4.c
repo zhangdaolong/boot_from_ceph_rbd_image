@@ -5,6 +5,7 @@
 #include <Library/BaseMemoryLib.h>
 #include <Protocol/ServiceBinding.h>
 #include <Protocol/Tcp4.h>
+#include "CephRbdMsgrV1Handshake.h"
 #include "CephRbdTcp4.h"
 
 typedef struct {
@@ -27,6 +28,12 @@ static UINTN mCloseCount;
 static BOOLEAN mConfigured;
 static BOOLEAN mTransmitValid;
 static BOOLEAN mFailChildProtocolClose;
+static UINT8 mSentBuffer[8192];
+static UINTN mSentLength;
+static CONST UINT8 *mReceiveScript;
+static UINTN mReceiveScriptLength;
+static UINTN mReceiveScriptOffset;
+static UINTN mReceiveMaxChunk;
 
 EFI_GUID gEfiTcp4ServiceBindingProtocolGuid = { 1, 0, 0, { 0 } };
 EFI_GUID gEfiTcp4ProtocolGuid = { 2, 0, 0, { 0 } };
@@ -187,20 +194,28 @@ static EFI_STATUS EFIAPI
 FakeTransmit(EFI_TCP4_PROTOCOL *This, EFI_TCP4_IO_TOKEN *Token)
 {
   EFI_TCP4_TRANSMIT_DATA *TxData;
+  UINTN                   Length;
 
   assert(This == &mTcp4);
   TxData = Token->Packet.TxData;
   assert(TxData != NULL);
   assert(TxData->Push == TRUE);
   assert(TxData->FragmentCount == 1);
-  assert(TxData->DataLength == 4);
-  assert(TxData->FragmentTable[0].FragmentLength == 4);
-  mTransmitValid = (BOOLEAN)(
-                     memcmp (
-                       TxData->FragmentTable[0].FragmentBuffer,
-                       "wire",
-                       4
-                       ) == 0);
+  assert(TxData->DataLength == TxData->FragmentTable[0].FragmentLength);
+  Length = TxData->DataLength;
+  assert(Length <= sizeof (mSentBuffer) - mSentLength);
+  CopyMem (
+    mSentBuffer + mSentLength,
+    TxData->FragmentTable[0].FragmentBuffer,
+    Length
+    );
+  mSentLength += Length;
+  if ((Length == 4) &&
+      (memcmp (TxData->FragmentTable[0].FragmentBuffer, "wire", 4) == 0))
+  {
+    mTransmitValid = TRUE;
+  }
+
   mSendCount++;
   SignalToken(&Token->CompletionToken, EFI_SUCCESS);
   return EFI_SUCCESS;
@@ -210,15 +225,36 @@ static EFI_STATUS EFIAPI
 FakeReceive(EFI_TCP4_PROTOCOL *This, EFI_TCP4_IO_TOKEN *Token)
 {
   EFI_TCP4_RECEIVE_DATA *RxData;
+  UINTN                 Length;
 
   assert(This == &mTcp4);
   RxData = Token->Packet.RxData;
   assert(RxData != NULL);
   assert(RxData->FragmentCount == 1);
-  assert(RxData->FragmentTable[0].FragmentLength >= 3);
-  CopyMem (RxData->FragmentTable[0].FragmentBuffer, "ack", 3);
-  RxData->DataLength = 3;
-  RxData->FragmentTable[0].FragmentLength = 3;
+  assert(RxData->FragmentTable[0].FragmentLength > 0);
+  if (mReceiveScript == NULL) {
+    Length = 3;
+    CopyMem (RxData->FragmentTable[0].FragmentBuffer, "ack", Length);
+  } else {
+    Length = mReceiveScriptLength - mReceiveScriptOffset;
+    if (Length > RxData->FragmentTable[0].FragmentLength) {
+      Length = RxData->FragmentTable[0].FragmentLength;
+    }
+
+    if ((mReceiveMaxChunk != 0) && (Length > mReceiveMaxChunk)) {
+      Length = mReceiveMaxChunk;
+    }
+
+    CopyMem (
+      RxData->FragmentTable[0].FragmentBuffer,
+      mReceiveScript + mReceiveScriptOffset,
+      Length
+      );
+    mReceiveScriptOffset += Length;
+  }
+
+  RxData->DataLength = (UINT32)Length;
+  RxData->FragmentTable[0].FragmentLength = (UINT32)Length;
   mReceiveCount++;
   SignalToken(&Token->CompletionToken, EFI_SUCCESS);
   return EFI_SUCCESS;
@@ -367,8 +403,34 @@ FakeCloseProtocol(
   return EFI_SUCCESS;
 }
 
+static EFI_STATUS
+RunTestHandshake(
+  CEPH_RBD_TCP4_CONNECTION *Connection,
+  EFI_IPv4_ADDRESS *RemoteAddress,
+  CEPH_MSGR_V1_NEGOTIATION *Negotiation
+  )
+{
+  return CephMsgrV1ClientHandshake(
+           Connection,
+           RemoteAddress,
+           6789,
+           0x0F,
+           CEPH_MSGR_CONNECT_HOST_CLIENT,
+           1,
+           6,
+           1,
+           0,
+           NULL,
+           0,
+           0,
+           0x05,
+           2,
+           Negotiation
+           );
+}
+
 void
-TestTcp4Transport(void)
+TestTcp4AndMessengerHandshake(void)
 {
   EFI_IPv4_ADDRESS RemoteAddress = { { 10, 0, 0, 7 } };
   CEPH_RBD_TCP4_CONNECTION Connection;
@@ -400,6 +462,153 @@ TestTcp4Transport(void)
   assert(mDestroyChildCount == 1);
   assert(mCloseProtocolCount == 2);
 
+  {
+    UINT8                         HandshakeReply[
+                                    CEPH_MSGR_V1_BANNER_LENGTH +
+                                    2 * CEPH_MSGR_V1_ENTITY_ADDR_LENGTH +
+                                    CEPH_MSGR_V1_CONNECT_REPLY_SIZE + 3
+                                    ];
+    CEPH_MSGR_V1_NEGOTIATION      Negotiation;
+    UINTN                         ServerAddressOffset;
+    UINTN                         ReplyOffset;
+    UINTN                         HandshakeLength;
+
+    ZeroMem (HandshakeReply, sizeof (HandshakeReply));
+    CopyMem (HandshakeReply, "ceph v027", CEPH_MSGR_V1_BANNER_LENGTH);
+    ServerAddressOffset = CEPH_MSGR_V1_BANNER_LENGTH;
+    HandshakeReply[ServerAddressOffset + 8] = 0;
+    HandshakeReply[ServerAddressOffset + 9] = 2;
+    HandshakeReply[ServerAddressOffset + 10] = 0x1A;
+    HandshakeReply[ServerAddressOffset + 11] = 0x85;
+    CopyMem (
+      HandshakeReply + ServerAddressOffset + 12,
+      RemoteAddress.Addr,
+      sizeof (RemoteAddress.Addr)
+      );
+
+    ServerAddressOffset += CEPH_MSGR_V1_ENTITY_ADDR_LENGTH;
+    HandshakeReply[ServerAddressOffset + 8] = 0;
+    HandshakeReply[ServerAddressOffset + 9] = 2;
+    HandshakeReply[ServerAddressOffset + 10] = 0xC0;
+    HandshakeReply[ServerAddressOffset + 11] = 0x01;
+    HandshakeReply[ServerAddressOffset + 12] = 192;
+    HandshakeReply[ServerAddressOffset + 13] = 0;
+    HandshakeReply[ServerAddressOffset + 14] = 2;
+    HandshakeReply[ServerAddressOffset + 15] = 1;
+
+    ReplyOffset = CEPH_MSGR_V1_BANNER_LENGTH +
+                  2 * CEPH_MSGR_V1_ENTITY_ADDR_LENGTH;
+    HandshakeLength = ReplyOffset + CEPH_MSGR_V1_CONNECT_REPLY_SIZE;
+    HandshakeReply[ReplyOffset] = CEPH_MSGR_TAG_READY;
+    HandshakeReply[ReplyOffset + 1] = 0x05;
+    HandshakeReply[ReplyOffset + 9] = 3;
+    HandshakeReply[ReplyOffset + 13] = 7;
+    HandshakeReply[ReplyOffset + 17] = 1;
+
+    mReceiveScript = HandshakeReply;
+    mReceiveScriptLength = HandshakeLength;
+    mReceiveScriptOffset = 0;
+    mReceiveMaxChunk = 7;
+    mSentLength = 0;
+
+    ZeroMem (&Connection, sizeof (Connection));
+    assert(CephRbdTcp4Connect(
+             &mImage, &mController, &RemoteAddress, 6789, 2,
+             &Connection) == EFI_SUCCESS);
+    assert(RunTestHandshake(
+             &Connection, &RemoteAddress, &Negotiation) == EFI_SUCCESS);
+    assert(Negotiation.Ready);
+    assert(Negotiation.Action == CephMsgrConnectReady);
+    assert(Negotiation.AuthorizerReplyLength == 0);
+    assert(mReceiveScriptOffset == HandshakeLength);
+    assert(mSentLength ==
+           CEPH_MSGR_V1_BANNER_LENGTH +
+           CEPH_MSGR_V1_ENTITY_ADDR_LENGTH +
+           CEPH_MSGR_V1_CONNECT_SIZE);
+    assert(memcmp (mSentBuffer, "ceph v027", CEPH_MSGR_V1_BANNER_LENGTH) == 0);
+    assert(memcmp (
+             mSentBuffer + CEPH_MSGR_V1_BANNER_LENGTH,
+             HandshakeReply + CEPH_MSGR_V1_BANNER_LENGTH +
+               CEPH_MSGR_V1_ENTITY_ADDR_LENGTH,
+             CEPH_MSGR_V1_ENTITY_ADDR_LENGTH
+             ) == 0);
+    assert(mSentBuffer[CEPH_MSGR_V1_BANNER_LENGTH +
+                       CEPH_MSGR_V1_ENTITY_ADDR_LENGTH + 8] ==
+           CEPH_MSGR_CONNECT_HOST_CLIENT);
+
+    mReceiveScript = NULL;
+    mReceiveMaxChunk = 0;
+    assert(CephRbdTcp4Close(&Connection, 2) == EFI_SUCCESS);
+
+    ZeroMem (HandshakeReply, sizeof (HandshakeReply));
+    CopyMem (HandshakeReply, "ceph v027", CEPH_MSGR_V1_BANNER_LENGTH);
+    ServerAddressOffset = CEPH_MSGR_V1_BANNER_LENGTH;
+    HandshakeReply[ServerAddressOffset + 8] = 0;
+    HandshakeReply[ServerAddressOffset + 9] = 2;
+    HandshakeReply[ServerAddressOffset + 10] = 0x1A;
+    HandshakeReply[ServerAddressOffset + 11] = 0x85;
+    CopyMem (
+      HandshakeReply + ServerAddressOffset + 12,
+      RemoteAddress.Addr,
+      sizeof (RemoteAddress.Addr)
+      );
+    ServerAddressOffset += CEPH_MSGR_V1_ENTITY_ADDR_LENGTH;
+    HandshakeReply[ServerAddressOffset + 8] = 0;
+    HandshakeReply[ServerAddressOffset + 9] = 2;
+    HandshakeReply[ServerAddressOffset + 10] = 0xC0;
+    HandshakeReply[ServerAddressOffset + 11] = 0x01;
+    HandshakeReply[ServerAddressOffset + 12] = 192;
+    HandshakeReply[ServerAddressOffset + 14] = 2;
+    HandshakeReply[ServerAddressOffset + 15] = 1;
+    HandshakeReply[ReplyOffset] = CEPH_MSGR_TAG_CHALLENGE_AUTH;
+    HandshakeReply[ReplyOffset + 1] = 0x05;
+    HandshakeReply[ReplyOffset + 9] = 3;
+    HandshakeReply[ReplyOffset + 13] = 7;
+    HandshakeReply[ReplyOffset + 17] = 1;
+    HandshakeReply[ReplyOffset + 21] = 3;
+    CopyMem (
+      HandshakeReply + HandshakeLength,
+      "xyz",
+      3
+      );
+
+    mReceiveScript = HandshakeReply;
+    mReceiveScriptLength = HandshakeLength + 3;
+    mReceiveScriptOffset = 0;
+    mReceiveMaxChunk = 5;
+    mSentLength = 0;
+    ZeroMem (&Connection, sizeof (Connection));
+    assert(CephRbdTcp4Connect(
+             &mImage, &mController, &RemoteAddress, 6789, 2,
+             &Connection) == EFI_SUCCESS);
+    assert(RunTestHandshake(
+             &Connection, &RemoteAddress, &Negotiation) == EFI_SUCCESS);
+    assert(!Negotiation.Ready);
+    assert(Negotiation.Action == CephMsgrConnectNeedAuthorizerChallenge);
+    assert(Negotiation.AuthorizerReplyLength == 3);
+    assert(memcmp (Negotiation.AuthorizerReply, "xyz", 3) == 0);
+    assert(CephRbdTcp4Close(&Connection, 2) == EFI_SUCCESS);
+
+    HandshakeReply[CEPH_MSGR_V1_BANNER_LENGTH + 10] = 0x1A;
+    HandshakeReply[CEPH_MSGR_V1_BANNER_LENGTH + 11] = 0x86;
+    mReceiveScriptLength = CEPH_MSGR_V1_BANNER_LENGTH +
+                           2 * CEPH_MSGR_V1_ENTITY_ADDR_LENGTH;
+    mReceiveScriptOffset = 0;
+    mSentLength = 0;
+    ZeroMem (&Connection, sizeof (Connection));
+    assert(CephRbdTcp4Connect(
+             &mImage, &mController, &RemoteAddress, 6789, 2,
+             &Connection) == EFI_SUCCESS);
+    assert(RunTestHandshake(
+             &Connection, &RemoteAddress, &Negotiation) ==
+           EFI_ACCESS_DENIED);
+    assert(mSentLength == CEPH_MSGR_V1_BANNER_LENGTH);
+    assert(CephRbdTcp4Close(&Connection, 2) == EFI_SUCCESS);
+
+    mReceiveScript = NULL;
+    mReceiveMaxChunk = 0;
+  }
+
   ZeroMem (&Connection, sizeof (Connection));
   assert(CephRbdTcp4Connect(
            &mImage, &mController, &RemoteAddress, 6789, 2,
@@ -409,6 +618,6 @@ TestTcp4Transport(void)
   assert(Connection.ProtocolOpen);
   assert(Connection.ChildHandle == &mChild);
   assert(CephRbdTcp4Close(&Connection, 2) == EFI_SUCCESS);
-  assert(mDestroyChildCount == 2);
-  assert(mCloseProtocolCount == 5);
+  assert(mDestroyChildCount == 5);
+  assert(mCloseProtocolCount == 11);
 }
