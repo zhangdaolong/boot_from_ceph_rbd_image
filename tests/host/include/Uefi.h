@@ -63,10 +63,17 @@ typedef VOID (EFIAPI *EFI_EVENT_NOTIFY)(EFI_EVENT Event, VOID *Context);
 #define EFI_ERROR(Status) ((Status) != EFI_SUCCESS)
 
 #define EFI_OPEN_PROTOCOL_GET_PROTOCOL  0x00000002U
+#define EFI_NATIVE_INTERFACE            0x00000001U
+#define EFI_MEDIA_CHANGED               (-16)
+#define EFI_WRITE_PROTECTED             (-17)
 #define EVT_TIMER                       0x80000000U
 #define EVT_NOTIFY_SIGNAL               0x00000200U
 #define TPL_APPLICATION                 4
 #define TPL_CALLBACK                    8
+
+#define OFFSET_OF(TYPE, Field) ((UINTN)&(((TYPE *)0)->Field))
+
+typedef struct _EFI_SYSTEM_TABLE EFI_SYSTEM_TABLE;
 
 typedef enum {
   TimerCancel,
@@ -100,6 +107,12 @@ struct _EFI_BOOT_SERVICES {
     CONST EFI_GUID *Protocol,
     EFI_HANDLE AgentHandle,
     EFI_HANDLE ControllerHandle
+    );
+  EFI_STATUS (*InstallProtocolInterface)(
+    IN OUT EFI_HANDLE *Handle,
+    IN CONST EFI_GUID *Protocol,
+    IN UINTN InterfaceType,
+    IN VOID *Interface
     );
 };
 

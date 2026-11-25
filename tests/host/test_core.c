@@ -12,6 +12,9 @@
 void TestTcp4AndMessengerHandshake(void);
 void TestMessengerFrameTransport(void);
 void TestMessengerSession(void);
+void TestCephXAndRecovery(void);
+void TestRpcCodecs(void);
+void TestBlockIo(void);
 
 static void
 WriteLe32(uint8_t *Buffer, uint32_t Value)
@@ -402,7 +405,19 @@ TestRbdFormat2(void)
   assert(CephRbdMapExtent(&image.Layout, 4096, 4096, &extent) == EFI_SUCCESS);
   assert(extent.ObjectNumber == 1 && extent.ObjectOffset == 0 && extent.Length == 4096);
 
-  metadata.Features = 1;
+  // Default image features from a real Ceph cluster must be readable.
+  metadata.Features = CEPH_RBD_FEATURE_LAYERING |
+                      CEPH_RBD_FEATURE_EXCLUSIVE_LOCK |
+                      CEPH_RBD_FEATURE_OBJECT_MAP |
+                      CEPH_RBD_FEATURE_FAST_DIFF |
+                      CEPH_RBD_FEATURE_DEEP_FLATTEN;
+  metadata.ObjectOrder = 22;
+  metadata.StripeUnit = 0;
+  metadata.StripeCount = 0;
+  assert(CephRbdFormat2Initialize(&metadata, &image) == EFI_SUCCESS);
+  metadata.Features = CEPH_RBD_FEATURE_DATA_POOL;
+  assert(CephRbdFormat2Initialize(&metadata, &image) == EFI_UNSUPPORTED);
+  metadata.Features = CEPH_RBD_FEATURES_INCOMPATIBLE;
   assert(CephRbdFormat2Initialize(&metadata, &image) == EFI_UNSUPPORTED);
   metadata.Features = 0;
   metadata.ObjectOrder = 32;
@@ -464,6 +479,9 @@ main(void)
   TestTcp4AndMessengerHandshake();
   TestMessengerFrameTransport();
   TestMessengerSession();
+  TestCephXAndRecovery();
+  TestRpcCodecs();
+  TestBlockIo();
   puts("core firmware tests: passed");
   return 0;
 }

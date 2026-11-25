@@ -22,6 +22,12 @@
   CephRbdTcp4.h
   CephRbdCephX.c
   CephRbdCephX.h
+  CephRbdMsgrV1Recovery.c
+  CephRbdMsgrV1Recovery.h
+  CephRbdRpc.c
+  CephRbdRpc.h
+  CephRbdBlockIo.c
+  CephRbdBlockIo.h
   CephRbdLayout.c
   CephRbdLayout.h
   CephRbdFormat2.c
@@ -43,6 +49,7 @@
   UefiLib
 
 [Protocols]
+  gEfiBlockIoProtocolGuid
   gEfiLoadedImageProtocolGuid
   gEfiTcp4ProtocolGuid
   gEfiTcp4ServiceBindingProtocolGuid

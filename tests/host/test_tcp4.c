@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include <Library/BaseMemoryLib.h>
+#include <Protocol/BlockIo.h>
 #include <Protocol/ServiceBinding.h>
 #include <Protocol/Tcp4.h>
 #include "CephRbdMsgrV1Handshake.h"
@@ -39,6 +40,7 @@ static UINTN mReceiveMaxChunk;
 
 EFI_GUID gEfiTcp4ServiceBindingProtocolGuid = { 1, 0, 0, { 0 } };
 EFI_GUID gEfiTcp4ProtocolGuid = { 2, 0, 0, { 0 } };
+EFI_GUID gEfiBlockIoProtocolGuid = { 3, 0, 0, { 0 } };
 
 static EFI_STATUS EFIAPI FakeCreateChild(
   EFI_SERVICE_BINDING_PROTOCOL *This,
@@ -120,15 +122,24 @@ static EFI_STATUS EFIAPI FakeCloseProtocol(
   EFI_HANDLE AgentHandle,
   EFI_HANDLE ControllerHandle
   );
+static EFI_STATUS EFIAPI FakeInstallProtocolInterface(
+  IN OUT EFI_HANDLE *Handle,
+  IN CONST EFI_GUID *Protocol,
+  IN UINTN InterfaceType,
+  IN VOID *Interface
+  );
 
-static EFI_BOOT_SERVICES mBootServices = {
+static EFI_HANDLE mBlockIoHandle;
+
+static EFI_BOOT_SERVICES   mBootServices = {
   FakeCreateEvent,
   FakeSetTimer,
   FakeWaitForEvent,
   FakeCheckEvent,
   FakeCloseEvent,
   FakeOpenProtocol,
-  FakeCloseProtocol
+  FakeCloseProtocol,
+  FakeInstallProtocolInterface
 };
 
 EFI_BOOT_SERVICES *gBS = &mBootServices;
@@ -402,6 +413,22 @@ FakeCloseProtocol(
     return EFI_DEVICE_ERROR;
   }
 
+  return EFI_SUCCESS;
+}
+
+static EFI_STATUS EFIAPI
+FakeInstallProtocolInterface(
+  IN OUT EFI_HANDLE *Handle,
+  IN CONST EFI_GUID *Protocol,
+  IN UINTN InterfaceType,
+  IN VOID *Interface
+  )
+{
+  (void)Protocol;
+  (void)InterfaceType;
+  (void)Interface;
+  assert(Handle != NULL);
+  mBlockIoHandle = (Handle != NULL) ? *Handle : NULL;
   return EFI_SUCCESS;
 }
 

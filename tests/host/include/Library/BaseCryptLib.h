@@ -24,4 +24,13 @@ AesCbcEncrypt (
   OUT UINT8       *Output
   );
 
+BOOLEAN
+AesCbcDecrypt (
+  IN VOID         *AesContext,
+  IN CONST UINT8  *Input,
+  IN UINTN        InputSize,
+  IN CONST UINT8  *Ivec,
+  OUT UINT8       *Output
+  );
+
 #endif

@@ -28,7 +28,12 @@ CephRbdFormat2Initialize (
     return EFI_BAD_BUFFER_SIZE;
   }
 
-  if ((Metadata->Features & ~CEPH_RBD_FEATURE_STRIPINGV2) != 0) {
+  // Reject data-pool/migration/non-primary layouts and any unknown or
+  // incompatible feature, but accept the write-path-only features that do
+  // not change how a read-only client locates object data.
+  if ((Metadata->Features &
+       ~(CEPH_RBD_FEATURES_READ_SAFE | CEPH_RBD_FEATURE_STRIPINGV2)) != 0)
+  {
     return EFI_UNSUPPORTED;
   }
 

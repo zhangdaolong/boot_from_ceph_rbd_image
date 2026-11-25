@@ -14,6 +14,101 @@ STATIC CONST UINT8  mCephAesIv[16] = {
 
 STATIC
 EFI_STATUS
+CephXAes128CbcDecrypt (
+  IN CONST UINT8  *Key,
+  IN CONST VOID   *Ciphertext,
+  IN UINTN        CiphertextLength,
+  OUT VOID        *Plaintext,
+  IN UINTN        PlaintextCapacity,
+  OUT UINTN       *PlaintextLength
+  )
+{
+  VOID     *AesContext;
+  UINT8    *Unpadded;
+  UINTN     AesContextSize;
+  UINTN     PaddingLength;
+  UINTN     Index;
+  BOOLEAN   Result;
+  EFI_STATUS Status;
+
+  if ((Key == NULL) || (Ciphertext == NULL) || (Plaintext == NULL) ||
+      (PlaintextLength == NULL) || (CiphertextLength == 0) ||
+      (CiphertextLength > CEPHX_MAX_ENCRYPTED_PAYLOAD) ||
+      ((CiphertextLength & 15) != 0) ||
+      (CiphertextLength > PlaintextCapacity))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *PlaintextLength = 0;
+  AesContextSize = AesGetContextSize ();
+  if (AesContextSize == 0) {
+    return EFI_UNSUPPORTED;
+  }
+
+  AesContext = AllocateZeroPool (AesContextSize);
+  Unpadded = AllocatePool (CiphertextLength);
+  if ((AesContext == NULL) || (Unpadded == NULL)) {
+    if (AesContext != NULL) {
+      ZeroMem (AesContext, AesContextSize);
+      FreePool (AesContext);
+    }
+
+    if (Unpadded != NULL) {
+      ZeroMem (Unpadded, CiphertextLength);
+      FreePool (Unpadded);
+    }
+
+    return EFI_OUT_OF_RESOURCES;
+  }
+
+  Result = AesInit (AesContext, Key, 128);
+  if (Result) {
+    Result = AesCbcDecrypt (
+               AesContext,
+               Ciphertext,
+               CiphertextLength,
+               mCephAesIv,
+               Unpadded
+               );
+  }
+
+  Status = Result ? EFI_SUCCESS : EFI_UNSUPPORTED;
+  if (EFI_ERROR (Status)) {
+    goto Done;
+  }
+
+  // PKCS#7 padding: the final byte is 1..16 and every padding byte equals it.
+  PaddingLength = Unpadded[CiphertextLength - 1];
+  if ((PaddingLength == 0) || (PaddingLength > 16) ||
+      (PaddingLength > CiphertextLength))
+  {
+    Status = EFI_COMPROMISED_DATA;
+    goto Done;
+  }
+
+  for (Index = CiphertextLength - PaddingLength; Index < CiphertextLength;
+       Index++)
+  {
+    if (Unpadded[Index] != PaddingLength) {
+      Status = EFI_COMPROMISED_DATA;
+      goto Done;
+    }
+  }
+
+  CopyMem (Plaintext, Unpadded, CiphertextLength - PaddingLength);
+  *PlaintextLength = CiphertextLength - PaddingLength;
+
+Done:
+  ZeroMem (Unpadded, CiphertextLength);
+  FreePool (Unpadded);
+  ZeroMem (AesContext, AesContextSize);
+  FreePool (AesContext);
+  return Status;
+}
+
+STATIC
+EFI_STATUS
 CephXAes128CbcEncrypt (
   IN CONST UINT8  *Key,
   IN CONST VOID   *Plaintext,
@@ -617,4 +712,530 @@ CephXComputeAesChallengeResponse (
 
   *ChallengeResponse = Result;
   return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephXDecryptAes128Payload (
+  IN CONST UINT8  *Key,
+  IN UINTN        KeyLength,
+  IN CONST VOID   *Buffer,
+  IN UINTN        BufferLength,
+  OUT VOID        *Payload,
+  IN UINTN        PayloadCapacity,
+  OUT UINTN       *PayloadLength
+  )
+{
+  CEPH_WIRE_CURSOR  Cursor;
+  CEPH_WIRE_CURSOR  Plain;
+  EFI_STATUS        Status;
+  CONST UINT8      *Ciphertext;
+  UINT32            CiphertextLength;
+  UINT8             Plaintext[CEPHX_MAX_ENCRYPTED_PAYLOAD];
+  UINTN             PlaintextLength;
+  UINT8             StructVersion;
+  UINT64            Magic;
+
+  if ((Key == NULL) || (Buffer == NULL) || (Payload == NULL) ||
+      (PayloadLength == NULL))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (KeyLength != CEPHX_AES_KEY_SIZE) {
+    return EFI_UNSUPPORTED;
+  }
+
+  *PayloadLength = 0;
+  Status = CephWireInit (&Cursor, Buffer, BufferLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephWireReadLe32 (&Cursor, &CiphertextLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if ((CiphertextLength == 0) ||
+      (CiphertextLength > Cursor.Remaining) ||
+      ((CiphertextLength & 15) != 0) ||
+      (CiphertextLength > sizeof (Plaintext)))
+  {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+
+  Ciphertext = Cursor.Data;
+  Status = CephXAes128CbcDecrypt (
+             Key,
+             Ciphertext,
+             CiphertextLength,
+             Plaintext,
+             sizeof (Plaintext),
+             &PlaintextLength
+             );
+  if (EFI_ERROR (Status)) {
+    ZeroMem (Plaintext, sizeof (Plaintext));
+    return Status;
+  }
+
+  Status = CephWireInit (&Plain, Plaintext, PlaintextLength);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadU8 (&Plain, &StructVersion);
+  }
+
+  if (!EFI_ERROR (Status) && (StructVersion != 1)) {
+    Status = EFI_UNSUPPORTED;
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe64 (&Plain, &Magic);
+  }
+
+  if (!EFI_ERROR (Status) && (Magic != CEPHX_AUTH_ENC_MAGIC)) {
+    Status = EFI_COMPROMISED_DATA;
+  }
+
+  if (!EFI_ERROR (Status) && (Plain.Remaining > PayloadCapacity)) {
+    Status = EFI_BUFFER_TOO_SMALL;
+  }
+
+  if (!EFI_ERROR (Status)) {
+    CopyMem (Payload, Plain.Data, Plain.Remaining);
+    *PayloadLength = Plain.Remaining;
+  }
+
+  ZeroMem (Plaintext, sizeof (Plaintext));
+  return Status;
+}
+
+EFI_STATUS
+CephXDecodeTicketBlob (
+  IN CONST VOID         *Buffer,
+  IN UINTN              BufferLength,
+  OUT CEPHX_TICKET_BLOB  *Ticket
+  )
+{
+  CEPH_WIRE_CURSOR  Cursor;
+  EFI_STATUS        Status;
+  UINT8             StructVersion;
+  UINT32            BlobLength;
+
+  if ((Buffer == NULL) || (Ticket == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  Ticket->SecretId = 0;
+  Ticket->Blob = NULL;
+  Ticket->BlobLength = 0;
+
+  Status = CephWireInit (&Cursor, Buffer, BufferLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephWireReadU8 (&Cursor, &StructVersion);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if (StructVersion != 1) {
+    return EFI_UNSUPPORTED;
+  }
+
+  Status = CephWireReadLe64 (&Cursor, &Ticket->SecretId);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &BlobLength);
+  }
+
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if ((BlobLength == 0) || (BlobLength > Cursor.Remaining)) {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+
+  Ticket->Blob = Cursor.Data;
+  Ticket->BlobLength = BlobLength;
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephXDecodeAndValidateTicket (
+  IN CONST CEPHX_TICKET_BLOB       *Ticket,
+  IN CONST UINT8                   *ServiceSecret,
+  IN UINTN                         ServiceSecretLength,
+  IN UINT64                        ExpectedGlobalId,
+  IN UINT64                        NowSeconds,
+  OUT CEPHX_SERVICE_TICKET_INFO    *Info
+  )
+{
+  EFI_STATUS        Status;
+  UINT8             Plaintext[CEPHX_MAX_ENCRYPTED_PAYLOAD];
+  UINTN             PlaintextLength;
+  CEPH_WIRE_CURSOR  Cursor;
+  UINT8             StructVersion;
+  UINT64            Value64;
+  UINT32            Value32;
+  UINT8             EntityType;
+  UINT8             AllowAll;
+  UINTN             NameLength;
+  UINTN             CapsLength;
+
+  if ((Ticket == NULL) || (Ticket->Blob == NULL) ||
+      (Ticket->BlobLength == 0) || (ServiceSecret == NULL) ||
+      (Info == NULL))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (ServiceSecretLength != CEPHX_AES_KEY_SIZE) {
+    return EFI_UNSUPPORTED;
+  }
+
+  ZeroMem (Info, sizeof (*Info));
+  Status = CephXDecryptAes128Payload (
+             ServiceSecret,
+             ServiceSecretLength,
+             Ticket->Blob,
+             Ticket->BlobLength,
+             Plaintext,
+             sizeof (Plaintext),
+             &PlaintextLength
+             );
+  if (EFI_ERROR (Status)) {
+    ZeroMem (Plaintext, sizeof (Plaintext));
+    return Status;
+  }
+
+  Status = CephWireInit (&Cursor, Plaintext, PlaintextLength);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadU8 (&Cursor, &StructVersion);
+  }
+
+  // CephXServiceTicketInfo v1: struct_v, AuthTicket, CryptoKey.
+  if (!EFI_ERROR (Status) && (StructVersion != 1)) {
+    Status = EFI_UNSUPPORTED;
+  }
+
+  // AuthTicket v2: struct_v, EntityName, global_id, auid, created, expires,
+  // AuthCapsInfo, flags.
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadU8 (&Cursor, &StructVersion);
+  }
+
+  if (!EFI_ERROR (Status) &&
+      ((StructVersion != 1) && (StructVersion != 2)))
+  {
+    Status = EFI_UNSUPPORTED;
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadU8 (&Cursor, &EntityType);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &Value32);
+  }
+
+  NameLength = Value32;
+  if (!EFI_ERROR (Status) && (NameLength > CEPHX_MAX_ENTITY_NAME)) {
+    Status = EFI_BAD_BUFFER_SIZE;
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireSkip (&Cursor, NameLength);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe64 (&Cursor, &Info->GlobalId);
+  }
+
+  // auid was introduced in AuthTicket v2. The wire always carries the
+  // CEPH_AUTH_UID_DEFAULT constant in modern encoders.
+  if (!EFI_ERROR (Status) && (StructVersion >= 2)) {
+    Status = CephWireReadLe64 (&Cursor, &Info->Auid);
+  } else if (!EFI_ERROR (Status)) {
+    Info->Auid = CEPHX_AUTH_UID_DEFAULT;
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &Info->CreatedSeconds);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &Info->CreatedNanoseconds);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &Info->ExpiresSeconds);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &Info->ExpiresNanoseconds);
+  }
+
+  // AuthCapsInfo v1: struct_v, allow_all, bufferlist caps.
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadU8 (&Cursor, &StructVersion);
+  }
+
+  if (!EFI_ERROR (Status) && (StructVersion != 1)) {
+    Status = EFI_UNSUPPORTED;
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadU8 (&Cursor, &AllowAll);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &Value32);
+  }
+
+  CapsLength = Value32;
+  if (!EFI_ERROR (Status) && (CapsLength > CEPHX_MAX_CAPS_BYTES)) {
+    Status = EFI_BAD_BUFFER_SIZE;
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireSkip (&Cursor, CapsLength);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &Info->Flags);
+  }
+
+  // CryptoKey: type (u16), created utime_t, u16 secret length, raw secret.
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe16 (&Cursor, &Info->SessionKey.Type);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &Info->SessionKey.CreatedSeconds);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor,
+                              &Info->SessionKey.CreatedNanoseconds);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe16 (&Cursor, &Info->SessionKey.KeyLength);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    if (Info->SessionKey.KeyLength != CEPHX_AES_KEY_SIZE) {
+      Status = EFI_UNSUPPORTED;
+    } else {
+      Status = CephWireReadBytes (
+                 &Cursor,
+                 Info->SessionKey.Key,
+                 Info->SessionKey.KeyLength
+                 );
+    }
+  }
+
+  if (!EFI_ERROR (Status) && (Cursor.Remaining != 0)) {
+    Status = EFI_COMPROMISED_DATA;
+  }
+
+  Info->AllowAll = AllowAll;
+  Info->SecretId = Ticket->SecretId;
+
+  // Fail closed on tampered or unsupported ticket contents.
+  if (!EFI_ERROR (Status)) {
+    if (Info->Auid != CEPHX_AUTH_UID_DEFAULT) {
+      Status = EFI_ACCESS_DENIED;
+    } else if (AllowAll != 0) {
+      Status = EFI_ACCESS_DENIED;
+    } else if ((Info->SessionKey.Type != CEPHX_CRYPTO_AES) ||
+               (Info->SessionKey.KeyLength != CEPHX_AES_KEY_SIZE))
+    {
+      Status = EFI_UNSUPPORTED;
+    } else if ((Info->CreatedNanoseconds > 1000000000U) ||
+               (Info->ExpiresNanoseconds > 1000000000U) ||
+               (Info->SessionKey.CreatedNanoseconds > 1000000000U))
+    {
+      Status = EFI_COMPROMISED_DATA;
+    } else if ((Info->ExpiresSeconds < Info->CreatedSeconds) ||
+               ((Info->ExpiresSeconds == Info->CreatedSeconds) &&
+                (Info->ExpiresNanoseconds < Info->CreatedNanoseconds)))
+    {
+      Status = EFI_COMPROMISED_DATA;
+    } else if ((ExpectedGlobalId != 0) &&
+               (Info->GlobalId != ExpectedGlobalId))
+    {
+      Status = EFI_ACCESS_DENIED;
+    }
+  }
+
+  // Ceph tolerates a 300s clock skew; reject already-expired tickets.
+  if (!EFI_ERROR (Status) && (NowSeconds != 0)) {
+    Value64 = (Info->ExpiresSeconds > CEPHX_TICKET_VALIDITY_SLOP_SECONDS) ?
+              Info->ExpiresSeconds - CEPHX_TICKET_VALIDITY_SLOP_SECONDS : 0;
+    if (NowSeconds > Value64) {
+      Status = EFI_ACCESS_DENIED;
+    }
+  }
+
+  ZeroMem (Plaintext, sizeof (Plaintext));
+  return Status;
+}
+
+EFI_STATUS
+CephXVerifyAuthorizeReply (
+  IN CONST UINT8  *SessionKey,
+  IN UINTN        SessionKeyLength,
+  IN CONST VOID   *Buffer,
+  IN UINTN        BufferLength,
+  IN UINT64       ClientNonce,
+  OUT VOID        *ConnectionSecret,  OPTIONAL
+  IN UINTN        ConnectionSecretCapacity,
+  OUT UINTN       *ConnectionSecretLength  OPTIONAL
+  )
+{
+  EFI_STATUS        Status;
+  UINT8             Plaintext[CEPHX_MAX_ENCRYPTED_PAYLOAD];
+  UINTN             PlaintextLength;
+  CEPH_WIRE_CURSOR  Cursor;
+  UINT8             StructVersion;
+  UINT64            NoncePlusOne;
+  UINT32            SecretLength;
+
+  if ((SessionKey == NULL) || (Buffer == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if ((ConnectionSecretLength != NULL) && (ConnectionSecret == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (SessionKeyLength != CEPHX_AES_KEY_SIZE) {
+    return EFI_UNSUPPORTED;
+  }
+
+  if (ConnectionSecretLength != NULL) {
+    *ConnectionSecretLength = 0;
+  }
+
+  Status = CephXDecryptAes128Payload (
+             SessionKey,
+             SessionKeyLength,
+             Buffer,
+             BufferLength,
+             Plaintext,
+             sizeof (Plaintext),
+             &PlaintextLength
+             );
+  if (EFI_ERROR (Status)) {
+    ZeroMem (Plaintext, sizeof (Plaintext));
+    return Status;
+  }
+
+  Status = CephWireInit (&Cursor, Plaintext, PlaintextLength);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadU8 (&Cursor, &StructVersion);
+  }
+
+  if (!EFI_ERROR (Status) &&
+      ((StructVersion != 1) && (StructVersion != 2)))
+  {
+    Status = EFI_UNSUPPORTED;
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe64 (&Cursor, &NoncePlusOne);
+  }
+
+  if (!EFI_ERROR (Status) &&
+      ((ClientNonce == MAX_UINT64) || (NoncePlusOne != ClientNonce + 1)))
+  {
+    Status = EFI_COMPROMISED_DATA;
+  }
+
+  if (!EFI_ERROR (Status) && (StructVersion >= 2)) {
+    Status = CephWireReadLe32 (&Cursor, &SecretLength);
+    if (!EFI_ERROR (Status)) {
+      if (SecretLength > Cursor.Remaining) {
+        Status = EFI_BAD_BUFFER_SIZE;
+      } else if ((SecretLength != 0) &&
+                 ((ConnectionSecret == NULL) ||
+                  (SecretLength > ConnectionSecretCapacity)))
+      {
+        Status = EFI_BUFFER_TOO_SMALL;
+      } else if (SecretLength != 0) {
+        Status = CephWireReadBytes (&Cursor, ConnectionSecret, SecretLength);
+        if (!EFI_ERROR (Status) && (ConnectionSecretLength != NULL)) {
+          *ConnectionSecretLength = SecretLength;
+        }
+      }
+    }
+  }
+
+  if (!EFI_ERROR (Status) && (Cursor.Remaining != 0)) {
+    Status = EFI_COMPROMISED_DATA;
+  }
+
+  ZeroMem (Plaintext, sizeof (Plaintext));
+  return Status;
+}
+
+EFI_STATUS
+CephXDecodeAuthorizeChallengeSecret (
+  IN CONST UINT8  *SessionKey,
+  IN UINTN        SessionKeyLength,
+  IN CONST VOID   *Buffer,
+  IN UINTN        BufferLength,
+  OUT UINT64      *ServerChallenge
+  )
+{
+  EFI_STATUS        Status;
+  UINT8             Plaintext[CEPHX_MAX_ENCRYPTED_PAYLOAD];
+  UINTN             PlaintextLength;
+  CEPH_WIRE_CURSOR  Cursor;
+  UINT8             StructVersion;
+
+  if ((SessionKey == NULL) || (Buffer == NULL) ||
+      (ServerChallenge == NULL))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (SessionKeyLength != CEPHX_AES_KEY_SIZE) {
+    return EFI_UNSUPPORTED;
+  }
+
+  Status = CephXDecryptAes128Payload (
+             SessionKey,
+             SessionKeyLength,
+             Buffer,
+             BufferLength,
+             Plaintext,
+             sizeof (Plaintext),
+             &PlaintextLength
+             );
+  if (EFI_ERROR (Status)) {
+    ZeroMem (Plaintext, sizeof (Plaintext));
+    return Status;
+  }
+
+  Status = CephWireInit (&Cursor, Plaintext, PlaintextLength);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadU8 (&Cursor, &StructVersion);
+  }
+
+  if (!EFI_ERROR (Status) && (StructVersion != 1)) {
+    Status = EFI_UNSUPPORTED;
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe64 (&Cursor, ServerChallenge);
+  }
+
+  if (!EFI_ERROR (Status) && (Cursor.Remaining != 0)) {
+    Status = EFI_COMPROMISED_DATA;
+  }
+
+  ZeroMem (Plaintext, sizeof (Plaintext));
+  return Status;
 }
