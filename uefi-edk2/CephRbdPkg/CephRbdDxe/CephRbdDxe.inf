@@ -12,6 +12,8 @@
   CephRbdWire.h
   CephRbdMessenger.c
   CephRbdMessenger.h
+  CephRbdMsgrV1Handshake.c
+  CephRbdMsgrV1Handshake.h
   CephRbdTcp4.c
   CephRbdTcp4.h
   CephRbdCephX.c
