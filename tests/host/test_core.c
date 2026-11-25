@@ -11,6 +11,7 @@
 
 void TestTcp4AndMessengerHandshake(void);
 void TestMessengerFrameTransport(void);
+void TestMessengerSession(void);
 
 static void
 WriteLe32(uint8_t *Buffer, uint32_t Value)
@@ -462,6 +463,7 @@ main(void)
   TestBiosStage2();
   TestTcp4AndMessengerHandshake();
   TestMessengerFrameTransport();
+  TestMessengerSession();
   puts("core firmware tests: passed");
   return 0;
 }

@@ -63,8 +63,9 @@ CephMsgrV1SendFrame (
 }
 
 EFI_STATUS
-CephMsgrV1ReceiveFrame (
+CephMsgrV1ReceiveFrameAfterTag (
   IN CEPH_RBD_TCP4_CONNECTION  *Connection,
+  IN UINT8                     Tag,
   IN UINTN                     MaximumPayload,
   IN UINT32                    TimeoutSeconds,
   OUT VOID                     *FrameBuffer,
@@ -97,20 +98,11 @@ CephMsgrV1ReceiveFrame (
   }
 
   Bytes = (UINT8 *)FrameBuffer;
-  Status = CephRbdTcp4ReceiveExact (
-             Connection,
-             Bytes,
-             1,
-             TimeoutSeconds
-             );
-  if (EFI_ERROR (Status)) {
-    return Status;
-  }
-
-  if (Bytes[0] != CEPH_MSGR_V1_TAG_MESSAGE) {
+  if (Tag != CEPH_MSGR_V1_TAG_MESSAGE) {
     return EFI_UNSUPPORTED;
   }
 
+  Bytes[0] = Tag;
   Status = CephRbdTcp4ReceiveExact (
              Connection,
              Bytes + 1,
@@ -177,4 +169,49 @@ CephMsgrV1ReceiveFrame (
 
   *FrameLength = RequiredLength;
   return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephMsgrV1ReceiveFrame (
+  IN CEPH_RBD_TCP4_CONNECTION  *Connection,
+  IN UINTN                     MaximumPayload,
+  IN UINT32                    TimeoutSeconds,
+  OUT VOID                     *FrameBuffer,
+  IN UINTN                     FrameBufferCapacity,
+  OUT CEPH_MSGR_V1_FRAME       *Frame,
+  OUT UINTN                    *FrameLength
+  )
+{
+  EFI_STATUS  Status;
+  UINT8       Tag;
+
+  if ((Connection == NULL) || (FrameBuffer == NULL) ||
+      (Frame == NULL) || (FrameLength == NULL) ||
+      (TimeoutSeconds == 0) || !Connection->Connected ||
+      (Connection->Tcp4 == NULL))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *FrameLength = 0;
+  Status = CephRbdTcp4ReceiveExact (
+             Connection,
+             &Tag,
+             sizeof (Tag),
+             TimeoutSeconds
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  return CephMsgrV1ReceiveFrameAfterTag (
+           Connection,
+           Tag,
+           MaximumPayload,
+           TimeoutSeconds,
+           FrameBuffer,
+           FrameBufferCapacity,
+           Frame,
+           FrameLength
+           );
 }
