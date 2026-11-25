@@ -27,4 +27,16 @@ CephMsgrV1ReceiveFrame (
   OUT UINTN                    *FrameLength
   );
 
+EFI_STATUS
+CephMsgrV1ReceiveFrameAfterTag (
+  IN CEPH_RBD_TCP4_CONNECTION  *Connection,
+  IN UINT8                     Tag,
+  IN UINTN                     MaximumPayload,
+  IN UINT32                    TimeoutSeconds,
+  OUT VOID                     *FrameBuffer,
+  IN UINTN                     FrameBufferCapacity,
+  OUT CEPH_MSGR_V1_FRAME       *Frame,
+  OUT UINTN                    *FrameLength
+  );
+
 #endif

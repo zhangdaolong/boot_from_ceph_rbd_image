@@ -6,6 +6,7 @@
 #include <Protocol/ServiceBinding.h>
 #include <Protocol/Tcp4.h>
 #include "CephRbdMsgrV1Handshake.h"
+#include "CephRbdMsgrV1Session.h"
 #include "CephRbdMsgrV1Transport.h"
 #include "CephRbdTcp4.h"
 
@@ -430,6 +431,16 @@ RunTestHandshake(
            );
 }
 
+static void
+WriteTestLe64(UINT8 *Data, UINT64 Value)
+{
+  UINTN Index;
+
+  for (Index = 0; Index < 8; Index++) {
+    Data[Index] = (UINT8)(Value >> (Index * 8));
+  }
+}
+
 void
 TestTcp4AndMessengerHandshake(void)
 {
@@ -621,6 +632,182 @@ TestTcp4AndMessengerHandshake(void)
   assert(CephRbdTcp4Close(&Connection, 2) == EFI_SUCCESS);
   assert(mDestroyChildCount == 5);
   assert(mCloseProtocolCount == 11);
+}
+
+void
+TestMessengerSession(void)
+{
+  EFI_IPv4_ADDRESS RemoteAddress = { { 10, 0, 0, 7 } };
+  CEPH_RBD_TCP4_CONNECTION Connection;
+  CEPH_MSGR_V1_NEGOTIATION Negotiation;
+  CEPH_MSGR_V1_SESSION Session;
+  CEPH_MSGR_V1_FRAME Outgoing;
+  CEPH_MSGR_V1_FRAME Incoming;
+  CEPH_MSGR_V1_FRAME SentFrame;
+  UINT8 OutgoingBuffer[256];
+  UINT8 IncomingFrame[256];
+  UINT8 SessionScript[1024];
+  UINT8 ReceiveBuffer[256];
+  UINT8 KeepaliveTime[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+  UINTN OutgoingLength;
+  UINTN IncomingLength;
+  UINTN SessionScriptLength;
+  UINTN ScriptOffset;
+  UINTN FrameLength;
+  UINTN ControlOffset;
+
+  ZeroMem (&Connection, sizeof (Connection));
+  assert(CephRbdTcp4Connect(
+           &mImage, &mController, &RemoteAddress, 6789, 2,
+           &Connection) == EFI_SUCCESS);
+  ZeroMem (&Negotiation, sizeof (Negotiation));
+  Negotiation.Ready = TRUE;
+  Negotiation.Action = CephMsgrConnectReady;
+  assert(CephMsgrV1SessionInit(
+           &Session, &Connection, &Negotiation, 128, 2) == EFI_SUCCESS);
+
+  ZeroMem (&Outgoing, sizeof (Outgoing));
+  Outgoing.Type = 1;
+  Outgoing.Priority = 64;
+  Outgoing.Version = 1;
+  Outgoing.SourceType = CEPH_MSGR_CONNECT_HOST_CLIENT;
+  Outgoing.CompatVersion = 1;
+  Outgoing.FrontLength = 7;
+  Outgoing.Front = (CONST UINT8 *)"request";
+  mSentLength = 0;
+  assert(CephMsgrV1SessionSendMessage(
+           &Session,
+           &Outgoing,
+           OutgoingBuffer,
+           sizeof (OutgoingBuffer),
+           &OutgoingLength
+           ) == EFI_SUCCESS);
+  assert(Session.NextOutgoingSequence == 2);
+  assert(CephMsgrDecodeV1Frame(
+           mSentBuffer,
+           OutgoingLength,
+           128,
+           &SentFrame
+           ) == EFI_SUCCESS);
+  assert(SentFrame.Sequence == 1);
+
+  ZeroMem (&Incoming, sizeof (Incoming));
+  Incoming.Sequence = 1;
+  Incoming.Type = 2;
+  Incoming.Priority = 64;
+  Incoming.Version = 1;
+  Incoming.SourceType = 1;
+  Incoming.CompatVersion = 1;
+  Incoming.FrontLength = 8;
+  Incoming.Front = (CONST UINT8 *)"response";
+  assert(CephMsgrEncodeV1Frame(
+           &Incoming,
+           128,
+           IncomingFrame,
+           sizeof (IncomingFrame),
+           &IncomingLength
+           ) == EFI_SUCCESS);
+
+  ScriptOffset = 0;
+  SessionScript[ScriptOffset++] = CEPH_MSGR_TAG_ACK;
+  WriteTestLe64(SessionScript + ScriptOffset, 1);
+  ScriptOffset += 8;
+  SessionScript[ScriptOffset++] = CEPH_MSGR_TAG_KEEPALIVE2;
+  CopyMem (SessionScript + ScriptOffset, KeepaliveTime, sizeof (KeepaliveTime));
+  ScriptOffset += sizeof (KeepaliveTime);
+  CopyMem (SessionScript + ScriptOffset, IncomingFrame, IncomingLength);
+  ScriptOffset += IncomingLength;
+  CopyMem (SessionScript + ScriptOffset, IncomingFrame, IncomingLength);
+  ScriptOffset += IncomingLength;
+  Incoming.Sequence = 2;
+  assert(CephMsgrEncodeV1Frame(
+           &Incoming,
+           128,
+           IncomingFrame,
+           sizeof (IncomingFrame),
+           &IncomingLength
+           ) == EFI_SUCCESS);
+  CopyMem (SessionScript + ScriptOffset, IncomingFrame, IncomingLength);
+  ScriptOffset += IncomingLength;
+  SessionScriptLength = ScriptOffset;
+  mReceiveScript = SessionScript;
+  mReceiveScriptLength = SessionScriptLength;
+  mReceiveScriptOffset = 0;
+  mReceiveMaxChunk = 9;
+
+  assert(CephMsgrV1SessionReceiveMessage(
+           &Session,
+           ReceiveBuffer,
+           sizeof (ReceiveBuffer),
+           &Incoming,
+           &FrameLength
+           ) == EFI_SUCCESS);
+  assert(Incoming.Sequence == 1);
+  assert(Incoming.FrontLength == 8);
+  assert(memcmp (Incoming.Front, "response", 8) == 0);
+  assert(Session.PeerAcknowledgedSequence == 1);
+  assert(Session.LastIncomingSequence == 1);
+
+  assert(CephMsgrV1SessionReceiveMessage(
+           &Session,
+           ReceiveBuffer,
+           sizeof (ReceiveBuffer),
+           &Incoming,
+           &FrameLength
+           ) == EFI_SUCCESS);
+  assert(Incoming.Sequence == 2);
+  assert(Session.LastIncomingSequence == 2);
+  assert(mReceiveScriptOffset == SessionScriptLength);
+
+  ControlOffset = OutgoingLength;
+  assert(mSentBuffer[ControlOffset] == CEPH_MSGR_TAG_KEEPALIVE2_ACK);
+  assert(memcmp (
+           mSentBuffer + ControlOffset + 1,
+           KeepaliveTime,
+           sizeof (KeepaliveTime)
+           ) == 0);
+  ControlOffset += 9;
+  assert(mSentBuffer[ControlOffset] == CEPH_MSGR_TAG_ACK);
+  assert(mSentBuffer[ControlOffset + 1] == 1);
+  ControlOffset += 9;
+  assert(mSentBuffer[ControlOffset] == CEPH_MSGR_TAG_ACK);
+  assert(mSentBuffer[ControlOffset + 1] == 1);
+  ControlOffset += 9;
+  assert(mSentBuffer[ControlOffset] == CEPH_MSGR_TAG_ACK);
+  assert(mSentBuffer[ControlOffset + 1] == 2);
+
+  mReceiveScript = NULL;
+  mReceiveScriptLength = 0;
+  mReceiveScriptOffset = 0;
+  mReceiveMaxChunk = 0;
+  assert(CephRbdTcp4Close(&Connection, 2) == EFI_SUCCESS);
+
+  ZeroMem (&Connection, sizeof (Connection));
+  assert(CephRbdTcp4Connect(
+           &mImage, &mController, &RemoteAddress, 6789, 2,
+           &Connection) == EFI_SUCCESS);
+  assert(CephMsgrV1SessionInit(
+           &Session, &Connection, &Negotiation, 128, 2) == EFI_SUCCESS);
+  {
+    UINT8 InvalidAck[9] = { CEPH_MSGR_TAG_ACK, 1, 0, 0, 0, 0, 0, 0, 0 };
+
+    mReceiveScript = InvalidAck;
+    mReceiveScriptLength = sizeof (InvalidAck);
+    mReceiveScriptOffset = 0;
+    assert(CephMsgrV1SessionReceiveMessage(
+             &Session,
+             ReceiveBuffer,
+             sizeof (ReceiveBuffer),
+             &Incoming,
+             &FrameLength
+             ) == EFI_COMPROMISED_DATA);
+    assert(!Session.Ready);
+  }
+
+  mReceiveScript = NULL;
+  mReceiveScriptLength = 0;
+  mReceiveScriptOffset = 0;
+  assert(CephRbdTcp4Close(&Connection, 2) == EFI_SUCCESS);
 }
 
 void

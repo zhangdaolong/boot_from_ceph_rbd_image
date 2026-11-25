@@ -2,7 +2,7 @@
 
 This repository is developing firmware-side paths that make a Ceph RBD image visible directly during UEFI or Legacy BIOS startup.
 
-> Status: the repository now contains independently testable Ceph messenger v1 framing and connect negotiation, including the banner/address/connect handshake and bounded message-frame I/O over UEFI TCP4, CephX payload codecs and AES-128 challenge-response, RBD Format 2 layout/object-name helpers, and a BIOS MBR partition-loader core. It is still not a bootable Ceph client: persistent messenger sessions and control-tag/sequence handling, CephX ticket decryption/validation and authorizer verification, Monitor/OSD sessions, RBD metadata RPCs, UEFI Block I/O publication, and BIOS PXE/control transfer remain incomplete.
+> Status: the repository now contains independently testable Ceph messenger v1 framing and connect negotiation, including the banner/address/connect handshake, bounded message-frame I/O, message sequencing, ACK and keepalive handling over UEFI TCP4, CephX payload codecs and AES-128 challenge-response, RBD Format 2 layout/object-name helpers, and a BIOS MBR partition-loader core. It is still not a bootable Ceph client: CephX ticket decryption/validation and authorizer verification, Monitor/OSD sessions, retry/reconnect handling, RBD metadata RPCs, UEFI Block I/O publication, and BIOS PXE/control transfer remain incomplete.
 
 ## Architecture
 

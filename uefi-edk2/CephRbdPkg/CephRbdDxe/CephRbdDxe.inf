@@ -16,6 +16,8 @@
   CephRbdMsgrV1Handshake.h
   CephRbdMsgrV1Transport.c
   CephRbdMsgrV1Transport.h
+  CephRbdMsgrV1Session.c
+  CephRbdMsgrV1Session.h
   CephRbdTcp4.c
   CephRbdTcp4.h
   CephRbdCephX.c
