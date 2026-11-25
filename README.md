@@ -2,7 +2,7 @@
 
 This repository is developing firmware-side paths that make a Ceph RBD image visible directly during UEFI or Legacy BIOS startup.
 
-> Status: the repository now contains independently testable Ceph messenger v1 connect/frame codecs, CephX payload codecs and AES-128 challenge-response, RBD Format 2 layout/object-name helpers, and a BIOS MBR partition-loader core. A libvirt/QEMU example can boot an existing UEFI disk image stored on Ceph RBD using QEMU's host-side RBD backend. This is separate from the still-incomplete native firmware Ceph client: banner/address exchange, TCP, CephX ticket decryption/validation and authorizer verification, Monitor/OSD sessions, RBD metadata RPCs, UEFI Block I/O publication, and BIOS PXE/control transfer remain incomplete.
+> Status: the repository now contains independently testable Ceph messenger v1 connect/frame codecs, CephX payload codecs and AES-128 challenge-response, RBD Format 2 layout/object-name helpers, and a BIOS MBR partition-loader core. It is still not a bootable Ceph client: banner/address exchange, TCP, CephX ticket decryption/validation and authorizer verification, Monitor/OSD sessions, RBD metadata RPCs, UEFI Block I/O publication, and BIOS PXE/control transfer remain incomplete.
 
 ## Architecture
 
@@ -82,8 +82,6 @@ Requirements vary by EDK II release and Linux distribution. The repository will 
 No physical BIOS, firmware image, or EDK II build tree should be committed to this repository. OVMF, EDK II, Ceph packages, and generated firmware binaries must remain host/build artifacts.
 
 Run the host-side parser/layout/BIOS-core tests with `sh tests/run-core-tests.sh`. Build the DXE package with `scripts/build-edk2.sh <EDK2_WORKSPACE> <PACKAGES_PATH>` after installing an EDK II workspace. An OVMF firmware-start smoke test can be run with `bash scripts/run-ovmf-ceph-rbd.sh [OVMF_CODE_FD] [KVM|TCG] [OVMF_VARS_FD]`; it uses a temporary copy of the variable store and does not load this driver or connect to a Ceph cluster. Neither host tests nor the OVMF smoke test substitute for an EDK II build or end-to-end boot.
-
-For a libvirt VM that boots an existing UEFI disk image directly from Ceph RBD through QEMU's native RBD backend, see [the libvirt/OVMF guide](docs/libvirt-rbd-uefi.md) and its domain/secret examples under `config/`. This host-side storage path does not implement Ceph in guest firmware.
 
 ## Existing guest-image prototype
 

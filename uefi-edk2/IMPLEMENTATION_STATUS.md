@@ -12,5 +12,3 @@ The current UEFI package is **not a working Ceph boot driver**. It contains test
 | Tests | Host tests for parsers, RBD helper and BIOS core | EDK II build, OVMF integration, Ceph cluster interoperability |
 
 See [`docs/firmware-rbd-protocol.md`](../docs/firmware-rbd-protocol.md) and [`tests/rbd-layout-vectors.md`](../tests/rbd-layout-vectors.md).
-
-For an immediately usable libvirt alternative, `config/libvirt-rbd-uefi.xml` boots an existing EFI-capable RBD image through QEMU's host-side RBD backend. The VM firmware sees a virtual disk; this does not change the native firmware implementation status above.
