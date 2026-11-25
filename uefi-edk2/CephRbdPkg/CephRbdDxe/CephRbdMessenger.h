@@ -5,6 +5,7 @@
 
 #define CEPH_MSGR_V1_TAG_MESSAGE       7
 #define CEPH_MSGR_V1_HEADER_SIZE       53
+#define CEPH_MSGR_V1_HEADER_CRC_OFFSET 49
 #define CEPH_MSGR_V1_FOOTER_SIZE       21
 #define CEPH_MSGR_V1_FOOTER_COMPLETE  0x01
 #define CEPH_MSGR_V1_FOOTER_NOCRC     0x02
@@ -57,6 +58,9 @@ typedef struct {
   UINT16       Type;
   UINT16       Priority;
   UINT16       Version;
+  UINT8        SourceType;
+  UINT64       SourceNumber;
+  UINT16       CompatVersion;
   UINT16       DataOffset;
   UINT32       FrontLength;
   UINT32       MiddleLength;
@@ -79,6 +83,15 @@ CephMsgrDecodeV1Frame (
   IN UINTN               BufferLength,
   IN UINTN               MaximumPayload,
   OUT CEPH_MSGR_V1_FRAME *Frame
+  );
+
+EFI_STATUS
+CephMsgrEncodeV1Frame (
+  IN CONST CEPH_MSGR_V1_FRAME  *Frame,
+  IN UINTN                     MaximumPayload,
+  OUT VOID                     *Buffer,
+  IN UINTN                     BufferLength,
+  OUT UINTN                    *EncodedLength
   );
 
 EFI_STATUS

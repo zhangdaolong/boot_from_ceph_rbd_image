@@ -116,10 +116,14 @@ CephMsgrDecodeV1Frame (
     return EFI_BAD_BUFFER_SIZE;
   }
 
-  if (CephMsgrReadLe32 (Header + 49) !=
-      CephMsgrCrc32c (Header, 49))
+  if (CephMsgrReadLe32 (Header + CEPH_MSGR_V1_HEADER_CRC_OFFSET) !=
+      CephMsgrCrc32c (Header, CEPH_MSGR_V1_HEADER_CRC_OFFSET))
   {
     return EFI_CRC_ERROR;
+  }
+
+  if (CephMsgrReadLe16 (Header + 47) != 0) {
+    return EFI_COMPROMISED_DATA;
   }
 
   Offset = 1 + CEPH_MSGR_V1_HEADER_SIZE;
@@ -160,6 +164,9 @@ CephMsgrDecodeV1Frame (
   Frame->Type            = CephMsgrReadLe16 (Header + 16);
   Frame->Priority        = CephMsgrReadLe16 (Header + 18);
   Frame->Version         = CephMsgrReadLe16 (Header + 20);
+  Frame->SourceType      = Header[36];
+  Frame->SourceNumber    = CephMsgrReadLe64 (Header + 37);
+  Frame->CompatVersion   = CephMsgrReadLe16 (Header + 45);
   Frame->FrontLength     = FrontLength;
   Frame->MiddleLength    = MiddleLength;
   Frame->DataLength      = DataLength;
@@ -168,6 +175,165 @@ CephMsgrDecodeV1Frame (
   Frame->Middle          = Frame->Front + FrontLength;
   Frame->Data            = Frame->Middle + MiddleLength;
   Frame->FooterFlags     = FooterFlags;
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephMsgrEncodeV1Frame (
+  IN CONST CEPH_MSGR_V1_FRAME  *Frame,
+  IN UINTN                     MaximumPayload,
+  OUT VOID                     *Buffer,
+  IN UINTN                     BufferLength,
+  OUT UINTN                    *EncodedLength
+  )
+{
+  CEPH_WIRE_WRITER  Writer;
+  EFI_STATUS        Status;
+  UINT32            PayloadLength;
+  UINTN             RequiredLength;
+  CONST UINT8       *Header;
+  UINT8             FooterFlags;
+
+  if ((Frame == NULL) || (Buffer == NULL) || (EncodedLength == NULL) ||
+      ((Frame->Front == NULL) && (Frame->FrontLength != 0)) ||
+      ((Frame->Middle == NULL) && (Frame->MiddleLength != 0)) ||
+      ((Frame->Data == NULL) && (Frame->DataLength != 0)))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *EncodedLength = 0;
+  if ((Frame->FrontLength > MAX_UINT32 - Frame->MiddleLength) ||
+      (Frame->FrontLength + Frame->MiddleLength >
+       MAX_UINT32 - Frame->DataLength))
+  {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+
+  PayloadLength = Frame->FrontLength + Frame->MiddleLength + Frame->DataLength;
+  if (PayloadLength > MaximumPayload) {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+
+  if ((Frame->FooterFlags & ~(CEPH_MSGR_V1_FOOTER_COMPLETE |
+                              CEPH_MSGR_V1_FOOTER_NOCRC)) != 0)
+  {
+    return EFI_UNSUPPORTED;
+  }
+
+  RequiredLength = 1 + CEPH_MSGR_V1_HEADER_SIZE + (UINTN)PayloadLength +
+                   CEPH_MSGR_V1_FOOTER_SIZE;
+  if (BufferLength < RequiredLength) {
+    return EFI_BUFFER_TOO_SMALL;
+  }
+
+  Header = (CONST UINT8 *)Buffer + 1;
+  Status = CephWireWriterInit (&Writer, Buffer, BufferLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephWireWriteU8 (&Writer, CEPH_MSGR_V1_TAG_MESSAGE);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe64 (&Writer, Frame->Sequence);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe64 (&Writer, Frame->TransactionId);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe16 (&Writer, Frame->Type);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe16 (&Writer, Frame->Priority);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe16 (&Writer, Frame->Version);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, Frame->FrontLength);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, Frame->MiddleLength);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, Frame->DataLength);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe16 (&Writer, Frame->DataOffset);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteU8 (&Writer, Frame->SourceType);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe64 (&Writer, Frame->SourceNumber);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe16 (&Writer, Frame->CompatVersion);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe16 (&Writer, 0);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (
+               &Writer,
+               CephMsgrCrc32c (Header, CEPH_MSGR_V1_HEADER_CRC_OFFSET));
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteBytes (&Writer, Frame->Front, Frame->FrontLength);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteBytes (&Writer, Frame->Middle, Frame->MiddleLength);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteBytes (&Writer, Frame->Data, Frame->DataLength);
+  }
+
+  FooterFlags = CEPH_MSGR_V1_FOOTER_COMPLETE |
+                (Frame->FooterFlags & CEPH_MSGR_V1_FOOTER_NOCRC);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, CephMsgrCrc32c (Frame->Front, Frame->FrontLength));
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, CephMsgrCrc32c (Frame->Middle, Frame->MiddleLength));
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (
+               &Writer,
+               (FooterFlags & CEPH_MSGR_V1_FOOTER_NOCRC) != 0 ?
+               0 : CephMsgrCrc32c (Frame->Data, Frame->DataLength));
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe64 (&Writer, 0);
+  }
+
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteU8 (&Writer, FooterFlags);
+  }
+
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  *EncodedLength = Writer.Written;
   return EFI_SUCCESS;
 }
 

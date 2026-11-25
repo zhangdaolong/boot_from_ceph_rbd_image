@@ -147,6 +147,18 @@ static void
 TestMessenger(void)
 {
   static const uint8_t crc_vector[] = "123456789";
+  static const uint8_t expected_frame[] = {
+    0x07, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+    0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+    0x2a, 0x00, 0x0a, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x08, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x3f, 0x7c, 0x5f, 0xce,
+    0x6f, 0x6b, 0x6d, 0x78, 0x79, 0x7a,
+    0xa2, 0x17, 0xaa, 0x9f, 0xb1, 0xdf, 0xee, 0xde,
+    0xff, 0xcb, 0x47, 0x45, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01
+  };
   uint8_t wire[1 + CEPH_MSGR_V1_HEADER_SIZE + CEPH_MSGR_V1_FOOTER_SIZE] = { 0 };
   uint8_t payload_wire[1 + CEPH_MSGR_V1_HEADER_SIZE + 2 + CEPH_MSGR_V1_FOOTER_SIZE] = { 0 };
   uint8_t *header = wire + 1;
@@ -154,7 +166,11 @@ TestMessenger(void)
   uint8_t *payload_header = payload_wire + 1;
   uint8_t *payload = payload_header + CEPH_MSGR_V1_HEADER_SIZE;
   uint8_t *payload_footer = payload + 2;
+  uint8_t encoded_frame[1 + CEPH_MSGR_V1_HEADER_SIZE + 6 +
+                        CEPH_MSGR_V1_FOOTER_SIZE];
   CEPH_MSGR_V1_FRAME frame;
+  CEPH_MSGR_V1_FRAME outbound = { 0 };
+  UINTN encoded_length = 0;
 
   wire[0] = CEPH_MSGR_V1_TAG_MESSAGE;
   WriteLe32(header + 49, CephMsgrCrc32c(header, 49));
@@ -189,6 +205,65 @@ TestMessenger(void)
   payload_footer[20] = CEPH_MSGR_V1_FOOTER_COMPLETE;
   assert(CephMsgrDecodeV1Frame(
            payload_wire, sizeof(payload_wire), 1024, &frame) == EFI_CRC_ERROR);
+
+  outbound.Sequence = 0x0102030405060708ULL;
+  outbound.TransactionId = 0x1122334455667788ULL;
+  outbound.Type = 42;
+  outbound.Priority = 10;
+  outbound.Version = 1;
+  outbound.SourceType = CEPH_MSGR_CONNECT_HOST_CLIENT;
+  outbound.SourceNumber = 7;
+  outbound.CompatVersion = 1;
+  outbound.FrontLength = 2;
+  outbound.MiddleLength = 1;
+  outbound.DataLength = 3;
+  outbound.Front = (const uint8_t *)"ok";
+  outbound.Middle = (const uint8_t *)"m";
+  outbound.Data = (const uint8_t *)"xyz";
+  assert(CephMsgrEncodeV1Frame(
+           &outbound, 6, encoded_frame, sizeof(encoded_frame),
+           &encoded_length) == EFI_SUCCESS);
+  assert(encoded_length == sizeof(encoded_frame));
+  assert(sizeof(expected_frame) == encoded_length);
+  assert(memcmp(encoded_frame, expected_frame, sizeof(expected_frame)) == 0);
+  assert(CephMsgrDecodeV1Frame(
+           encoded_frame, encoded_length, 6, &frame) == EFI_SUCCESS);
+  assert(frame.Sequence == outbound.Sequence);
+  assert(frame.TransactionId == outbound.TransactionId);
+  assert(frame.Type == outbound.Type && frame.Priority == outbound.Priority);
+  assert(frame.Version == outbound.Version);
+  assert(frame.SourceType == outbound.SourceType);
+  assert(frame.SourceNumber == outbound.SourceNumber);
+  assert(frame.CompatVersion == outbound.CompatVersion);
+  assert(frame.FrontLength == 2 && memcmp(frame.Front, "ok", 2) == 0);
+  assert(frame.MiddleLength == 1 && memcmp(frame.Middle, "m", 1) == 0);
+  assert(frame.DataLength == 3 && memcmp(frame.Data, "xyz", 3) == 0);
+  assert(CephMsgrEncodeV1Frame(
+           &outbound, 5, encoded_frame, sizeof(encoded_frame),
+           &encoded_length) == EFI_BAD_BUFFER_SIZE);
+  assert(encoded_length == 0);
+  assert(CephMsgrEncodeV1Frame(
+           &outbound, 6, encoded_frame, sizeof(encoded_frame) - 1,
+           &encoded_length) == EFI_BUFFER_TOO_SMALL);
+  outbound.FooterFlags = CEPH_MSGR_V1_FOOTER_NOCRC;
+  assert(CephMsgrEncodeV1Frame(
+           &outbound, 6, encoded_frame, sizeof(encoded_frame),
+           &encoded_length) == EFI_SUCCESS);
+  assert(CephMsgrDecodeV1Frame(
+           encoded_frame, encoded_length, 6, &frame) == EFI_SUCCESS);
+  assert((frame.FooterFlags & CEPH_MSGR_V1_FOOTER_NOCRC) != 0);
+  encoded_frame[1 + 48] = 1;
+  WriteLe32 (
+    encoded_frame + 1 + CEPH_MSGR_V1_HEADER_CRC_OFFSET,
+    CephMsgrCrc32c (
+      encoded_frame + 1, CEPH_MSGR_V1_HEADER_CRC_OFFSET));
+  assert(CephMsgrDecodeV1Frame(
+           encoded_frame, encoded_length, 6, &frame) == EFI_COMPROMISED_DATA);
+  outbound.FooterFlags = CEPH_MSGR_V1_FOOTER_SIGNED;
+  assert(CephMsgrEncodeV1Frame(
+           &outbound, 6, encoded_frame, sizeof(encoded_frame),
+           &encoded_length) == EFI_UNSUPPORTED);
+  assert(encoded_length == 0);
 }
 
 static void
