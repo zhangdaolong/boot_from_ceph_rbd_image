@@ -4,7 +4,7 @@ This document separates the UEFI and BIOS firmware work into stable interfaces a
 
 ## Implementation status
 
-The package currently has bounds-checked little-endian wire cursor helpers and an RBD striping extent mapper. These are protocol building blocks only; they do **not** implement a Ceph connection, CephX authentication, Monitor/OSD messaging, RBD metadata negotiation, or a bootable Block I/O device. Do not deploy this code to boot a system.
+The package currently has bounds-checked little-endian wire cursors, a bounded Ceph messenger v1 message decoder, CephX payload codecs and AES-128 challenge-response, and normalized RBD Format 2 layout/object-name helpers. The BIOS directory has an independently testable MBR partition loader core. These are protocol building blocks only; they do **not** implement network connections, CephX ticket decryption/validation or authorizer verification, Monitor/OSD RPCs, RBD metadata discovery, a bootable EFI Block I/O device, or BIOS PXE/control transfer. Do not deploy this code to boot a system.
 
 ## MVP operations
 
@@ -12,23 +12,27 @@ The package currently has bounds-checked little-endian wire cursor helpers and a
 |---|---:|---|
 | UEFI NIC discovery | Yes | Not implemented |
 | IPv4 TCP | Yes | Not implemented |
-| Ceph messenger framing/session | Yes | Not implemented |
-| CephX authentication | Yes | Not implemented; requires audited crypto and protocol compatibility tests |
+| Ceph messenger framing/session | Yes | Bounded v1 message decoder only; connection/session state is not implemented |
+| CephX authentication | Yes | AES-128-CBC challenge-response (Ceph `encode_encrypt` wrapper) and payload codecs are implemented; ticket decryption/validation and authorizer verification are not implemented |
 | Monitor session | Yes | Not implemented |
 | OSD session | Yes | Not implemented |
-| RBD format 2 metadata | Yes | Not implemented |
-| RBD object extent mapping | Yes | Layout math helper only |
+| RBD format 2 metadata | Yes | Normalized metadata validation only; on-wire metadata RPCs are not implemented |
+| RBD object extent mapping | Yes | Implemented for validated plain and striping-v2 layouts |
 | GPT partition discovery | Yes | Not implemented |
 | Read block range | Yes | Not implemented |
 | Writes/flush | No | Out of MVP scope |
 
 ## Bounded wire cursor
 
-`CephRbdWire.c` provides safe little-endian integer reads, bounded byte copies, and skips. Every operation checks the remaining buffer length before advancing the cursor. These helpers are deliberately transport-neutral and do not assume a particular Ceph messenger version or message structure.
+`CephRbdWire.c` provides safe little-endian integer reads/writes, bounded byte copies, and skips. `CephRbdMessenger.c` encodes/decodes the fixed Ceph messenger v1 connect records, bounds the optional authorizer bytes, classifies ready/retry/reset/wait responses, and decodes message frames with aggregate-length and CRC32C validation. It rejects incomplete and signed frames and exposes front/middle/data slices. It does not implement banner/address exchange, TCP, retries, or message sequence/ACK handling; it is not messenger v2 and does not establish a session.
+
+The sample monitor configuration uses the standard messenger v2 port (3300), while this decoder only handles v1 message frames. A complete client must implement v2 or explicitly negotiate/connect to a cluster endpoint with v1 enabled (typically port 6789); no transport is wired in yet.
+
+`CephRbdCephX.c` parses version-1 server/authorizer challenges and response headers; encodes request headers, service-ticket requests, version-2 authorizer payloads, and version-3 authenticate payloads; bounds optional connection-secret parsing; and implements AES-128-CBC/PKCS#7 using Ceph's fixed IV and encrypted-payload wrapper for the challenge-response calculation. Only 16-byte AES keys are supported. AES-256-KRB5, ticket decryption/validation, and authorizer cryptography are not implemented; successful challenge-response calculation or payload encoding alone does not establish an authenticated session.
 
 ## RBD striping map
 
-`CephRbdLayout.c` maps an image byte offset to one object extent using the format 2 layout tuple (image size, object size, stripe unit, stripe count). The caller must repeat the mapping for remaining bytes. Layout validation rejects zero values and object sizes that are not multiples of stripe unit. The helper does not parse RBD headers, resolve object names, discover OSDs, or fetch data.
+`CephRbdFormat2.c` accepts already-decoded metadata, validates image size/order/features and either the default layout or striping-v2 parameters, then constructs `<object-prefix>.<16-hex-digit-object-number>` names. `CephRbdLayout.c` maps an image byte offset to one object extent. These helpers do not parse OSD class-method replies, discover image IDs, resolve pools/OSDs, or fetch data.
 
 ## UEFI driver state machine
 
@@ -41,7 +45,7 @@ A future driver must expose media only after authentication and RBD metadata val
 
 ## Security and protocol compatibility requirements
 
-- Do not implement CephX cryptography from an informal description; use a vetted, compatible cryptographic implementation and test against supported Ceph releases.
+- Do not extend CephX cryptography from an informal description; use a vetted, compatible cryptographic implementation and test against supported Ceph releases.
 - Never log Ceph keys or messenger session keys.
 - Keep credentials in protected firmware storage and reject unauthenticated configuration updates.
 - Reject malformed monitor, OSD, and RBD metadata lengths; cap all allocations.
@@ -49,3 +53,5 @@ A future driver must expose media only after authentication and RBD metadata val
 - Fail closed on unsupported messenger features, image features, and striping layouts.
 
 See `tests/rbd-layout-vectors.md` for deterministic layout vectors.
+
+Run `sh tests/run-core-tests.sh` for native checks of wire bounds, CephX payload encoding and a fixed AES-128 challenge-response vector, messenger frame integrity, Format 2 layout/object naming, and BIOS active-partition loading. These do not replace EDK II, OVMF, or Ceph interoperability testing.
