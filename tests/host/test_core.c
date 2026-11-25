@@ -10,6 +10,7 @@
 #include "ceph_stage2.h"
 
 void TestTcp4AndMessengerHandshake(void);
+void TestMessengerFrameTransport(void);
 
 static void
 WriteLe32(uint8_t *Buffer, uint32_t Value)
@@ -460,6 +461,7 @@ main(void)
   TestRbdFormat2();
   TestBiosStage2();
   TestTcp4AndMessengerHandshake();
+  TestMessengerFrameTransport();
   puts("core firmware tests: passed");
   return 0;
 }

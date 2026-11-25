@@ -45,6 +45,14 @@ CephRbdTcp4Receive (
   );
 
 EFI_STATUS
+CephRbdTcp4ReceiveExact (
+  IN CEPH_RBD_TCP4_CONNECTION  *Connection,
+  OUT VOID                     *Buffer,
+  IN UINTN                     BufferLength,
+  IN UINT32                    TimeoutSeconds
+  );
+
+EFI_STATUS
 CephRbdTcp4Close (
   IN OUT CEPH_RBD_TCP4_CONNECTION  *Connection,
   IN UINT32                        TimeoutSeconds
