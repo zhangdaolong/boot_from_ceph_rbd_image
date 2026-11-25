@@ -1,0 +1,8 @@
+#ifndef TEST_UEFI_BOOT_SERVICES_TABLE_LIB_H_
+#define TEST_UEFI_BOOT_SERVICES_TABLE_LIB_H_
+
+#include <Uefi.h>
+
+extern EFI_BOOT_SERVICES *gBS;
+
+#endif
