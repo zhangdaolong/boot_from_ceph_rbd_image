@@ -225,6 +225,33 @@ FakeFailoverAttempt (
 }
 
 static void
+TestMonMapEpoch (VOID)
+{
+  UINT8   Buffer[64] = { 0 };
+  UINT64  EpochHolder = 0;
+
+  // MMonMap front: u32 blob length, ENCODE_START(10,6) = {10,6,u32 len},
+  // fsid (16 bytes), then signed epoch (le32).
+  WriteLe32 (Buffer, 26);        // blob length
+  Buffer[4] = 10;                // struct_v
+  Buffer[5] = 6;                 // struct_compat
+  WriteLe32 (Buffer + 6, 20);    // struct length (fsid + epoch)
+  memset (Buffer + 10, 0x5a, 16);// fsid
+  WriteLe32 (Buffer + 26, 451);  // epoch
+
+  assert(CephRpcDecodeMonMapEpoch (Buffer, 30, NULL) == EFI_INVALID_PARAMETER);
+  assert(CephRpcDecodeMonMapEpoch (Buffer, 30, &EpochHolder) == EFI_SUCCESS);
+  assert(EpochHolder == 451);
+
+  EpochHolder = 0;
+  Buffer[4] = 0;
+  assert(CephRpcDecodeMonMapEpoch (Buffer, 30, &EpochHolder) == EFI_UNSUPPORTED);
+  Buffer[4] = 10;
+  WriteLe32 (Buffer, 100);       // blob length exceeds buffer
+  assert(CephRpcDecodeMonMapEpoch (Buffer, 30, &EpochHolder) == EFI_BAD_BUFFER_SIZE);
+}
+
+static void
 TestRpcFailover (VOID)
 {
   FAKE_FAILOVER  Fake;
@@ -275,6 +302,7 @@ TestRpcCodecs (VOID)
 {
   TestMonCodecs ();
   TestOsdMapEpoch ();
+  TestMonMapEpoch ();
   TestOsdOpCodecs ();
   TestRpcFailover ();
   puts("RPC codec tests: passed");

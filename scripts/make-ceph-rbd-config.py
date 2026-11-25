@@ -5,8 +5,11 @@ Usage: make-ceph-rbd-config.py CONFIG.ini OUTPUT.bin
 
 The binary layout must stay in sync with uefi-edk2/CephRbdPkg/CephRbdDxe/
 CephRbdConfig.h. All integers are little-endian and the blob is 372 bytes.
-Key material is never embedded: "key-source" is stored as an opaque reference
-that the platform's protected credential provider resolves at runtime.
+Two key forms are supported:
+  * "key-source" stores an opaque reference that a platform's protected
+    credential provider resolves at runtime (sets KEY_REFERENCE flag).
+  * "key-hex" stores a raw 16-byte AES-128 secret for drivers that consume
+    key material directly (clears KEY_REFERENCE flag).
 """
 
 import configparser
@@ -58,19 +61,36 @@ def encode(config_path):
 
     image = section["image"].encode("utf-8")
     identity = section["client-id"].encode("utf-8")
-    key_reference = section.get("key-source", "").encode("utf-8")
+    flags = int(section.get("flags", "0"), 0)
+    key_hex = section.get("key-hex", "").strip()
+    key_source = section.get("key-source", "").strip()
+    if bool(key_hex) == bool(key_source):
+        raise ValueError("exactly one of key-hex or key-source is required")
+    if key_hex:
+        try:
+            key_blob = bytes.fromhex(key_hex)
+        except ValueError:
+            raise ValueError("key-hex is not valid hexadecimal")
+        if len(key_blob) != 16:
+            raise ValueError("key-hex must be exactly 16 bytes (AES-128)")
+        # Raw key bytes are consumed directly by the driver.
+        flags &= ~0x1
+    else:
+        key_blob = key_source.encode("utf-8")
+        if not key_blob or len(key_blob) > MAX_KEY:
+            raise ValueError("key-source is empty or too long")
+        # An opaque reference needs the platform secret resolver.
+        flags |= 0x1
     if not image or len(image) >= MAX_IMAGE:
         raise ValueError("image name is empty or too long")
     if not identity or len(identity) >= MAX_IDENTITY:
         raise ValueError("client-id is empty or too long")
-    if not key_reference or len(key_reference) > MAX_KEY:
-        raise ValueError("key-source is empty or too long")
 
     fields = [
         SIGNATURE,
         VERSION,
         BLOB_SIZE,
-        int(section.get("flags", "0"), 0),
+        flags,
         fsid,
         int(section["pool"]),
         len(monitors),
@@ -85,8 +105,8 @@ def encode(config_path):
         image,
         len(identity),
         identity,
-        len(key_reference),
-        key_reference,
+        len(key_blob),
+        key_blob,
     ])
 
     layout = "<4I16s2I"

@@ -303,6 +303,77 @@ CephRpcDecodeOsdMapEpoch (
   return EFI_SUCCESS;
 }
 
+EFI_STATUS
+CephRpcDecodeMonMapEpoch (
+  IN CONST VOID  *Buffer,
+  IN UINTN       BufferLength,
+  OUT UINT64     *Epoch
+  )
+{
+  CEPH_WIRE_CURSOR  Cursor;
+  EFI_STATUS        Status;
+  UINT32            BlobLength;
+  UINT8             StructVersion;
+  UINT8             CompatVersion;
+  UINT32            StructLength;
+  INT32             RawEpoch;
+
+  if ((Buffer == NULL) || (Epoch == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  Status = CephWireInit (&Cursor, Buffer, BufferLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  // MMonMap front is a single encoded bufferlist: u32 byte count, then the
+  // MonMap::encode() payload with ENCODE_START(10,6), fsid and epoch.
+  Status = CephWireReadLe32 (&Cursor, &BlobLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if ((BlobLength == 0) || (BlobLength > Cursor.Remaining)) {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+
+  Status = CephWireReadU8 (&Cursor, &StructVersion);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadU8 (&Cursor, &CompatVersion);
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &StructLength);
+  }
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if ((StructVersion < 1) || (StructVersion > 20)) {
+    return EFI_UNSUPPORTED;
+  }
+
+  if (StructLength < (CEPH_FSID_SIZE + sizeof (RawEpoch))) {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+  (VOID)CompatVersion;
+
+  Status = CephWireSkip (&Cursor, CEPH_FSID_SIZE);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, (UINT32 *)&RawEpoch);
+  }
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if (RawEpoch < 0) {
+    return EFI_COMPROMISED_DATA;
+  }
+
+  *Epoch = (UINT64)RawEpoch;
+  return EFI_SUCCESS;
+}
+
 STATIC
 EFI_STATUS
 CephRpcWriteOsdOp (
@@ -722,10 +793,11 @@ CephRpcCall (
       return Status;
     }
 
-    if ((Incoming.TransactionId != RequestId) ||
-        (Incoming.Type != ExpectedReplyType))
-    {
-      // Skip replies to other transactions (e.g. delayed OSD map updates).
+    // A Ceph monitor assigns its own transaction id to reply messages and does
+    // not echo the request's header tid (verified against MAuthReply on Ceph
+    // 22). Matching requests and replies synchronously therefore has to rely
+    // on the message type only; the driver issues one RPC at a time.
+    if (Incoming.Type != ExpectedReplyType) {
       continue;
     }
 

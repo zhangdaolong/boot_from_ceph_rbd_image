@@ -1,0 +1,19 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.dll
+*.efi
+tests/live/.build/
+tests/.build/
+build/
+
+# Generated config blobs and local override config
+*.bin
+!tests/**/vectors/*.bin
+ceph.conf
+keyring
+
+# Editor/backup files
+*~
+*.swp

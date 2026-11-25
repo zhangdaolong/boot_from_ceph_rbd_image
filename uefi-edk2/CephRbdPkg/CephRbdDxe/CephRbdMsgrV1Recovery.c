@@ -417,23 +417,11 @@ CephRbdMsgrV1FinishSeqRecovery (
     return Status;
   }
 
-  // After the SEQ exchange the peer sends the final READY connect reply.
-  Status = CephRbdTcp4ReceiveExact (
-             &Client->Connection,
-             AckWire,
-             sizeof (AckWire),
-             Config->TimeoutSeconds
-             );
-  if (EFI_ERROR (Status)) {
-    return Status;
-  }
-
-  ZeroMem (&Client->Negotiation, sizeof (Client->Negotiation));
-  Client->Negotiation.ConnectReply.Tag = AckWire[0];
-  Client->Negotiation.Action = CephMsgrConnectRejected;
-  if (AckWire[0] != CEPH_MSGR_TAG_READY) {
-    return EFI_ACCESS_DENIED;
-  }
+  // Ceph does not send a second READY reply after the SEQ exchange: once our
+  // in_seq is written the connection is live. Waiting for another tag here
+  // stalls until the socket timeout.
+  Client->Negotiation.Ready = TRUE;
+  Client->Negotiation.Action = CephMsgrConnectReady;
 
   Session = &Client->Session;
   ZeroMem (Session, sizeof (*Session));

@@ -2,7 +2,7 @@
 
 This repository is developing firmware-side paths that make a Ceph RBD image visible directly during UEFI or Legacy BIOS startup.
 
-> Status: the repository now contains host-tested Ceph messenger v1 framing and connect negotiation, bounded connect retry and connect-time `SEQ` recovery with a retransmission queue and reconnect replay, CephX AES-128 challenge-response plus ticket decryption/validation and authorizer verification, Monitor/OSD RPC codecs with automatic reconnect on recoverable transport errors, RBD Format 2 metadata discovery and read-only block reads, a read-only `EFI_BLOCK_IO_PROTOCOL` publication path, a firmware configuration source (`CephRbdConfig`) with an `EFI_DRIVER_BINDING_PROTOCOL` that maps the configured image (trying each configured monitor), and a BIOS MBR partition-loader core. It is still not a bootable Ceph client: no EDK II/OVMF build or live Ceph interoperability test has been run, the CephX challenge/ticket exchange is not yet driven from the messenger connect flow, CRUSH-based OSD placement is not implemented, GPT/ESP discovery is absent, and BIOS PXE/control transfer remains incomplete. Do not use this firmware to boot a production system.
+> Status: the repository now contains host-tested Ceph messenger v1 framing and connect negotiation, bounded connect retry and connect-time `SEQ` recovery with a retransmission queue and reconnect replay, CephX AES-128 challenge-response plus ticket decryption/validation and authorizer verification, Monitor/OSD RPC codecs with automatic reconnect on recoverable transport errors, RBD Format 2 metadata discovery and read-only block reads, a read-only `EFI_BLOCK_IO_PROTOCOL` publication path, a firmware configuration source (`CephRbdConfig`) with an `EFI_DRIVER_BINDING_PROTOCOL` that maps the configured image (trying each configured monitor), and a BIOS MBR partition-loader core. The CephX MAuth challenge-response handshake is now driven from the messenger connect flow, and a host-side live probe has validated connect + authentication + `MON_GET_MAP` against a real Ceph 22 monitor. It is still not a bootable Ceph client: no EDK II/OVMF build has been run, the final AUTH ticket session key is not parsed, CRUSH-based OSD placement is not implemented, GPT/ESP discovery is absent, and BIOS PXE/control transfer remains incomplete. Do not use this firmware to boot a production system.
 
 ## Architecture
 
@@ -43,9 +43,28 @@ The MVP does not initially implement arbitrary CRUSH discovery, every RBD featur
 uefi-edk2/CephRbdPkg/     EDK II DXE package and protocol core
 bios/                     Legacy BIOS Option ROM/second-stage design and code
 config/                   Example Ceph and boot configuration
+docs/                     Protocol contract and VM boot guides
 scripts/                  Build and QEMU test helpers
 tests/                    Host-side protocol/layout/loader tests and vectors
 ```
+
+## Booting a VM from Ceph RBD
+
+See [`docs/boot-vm-from-ceph-rbd.md`](docs/boot-vm-from-ceph-rbd.md) for the
+complete guide. In short:
+
+- **Path A — hypervisor-side RBD (works today):** QEMU/libvirt authenticates to
+  Ceph through `librbd` and presents the image as a virtio-blk disk. The guest
+  does not know the disk is RBD. Use this for a bootable VM now.
+- **Path B — firmware-side RBD (this project, in progress):** OVMF loads
+  `CephRbdDxe.efi`, which reads the image itself and exposes a read-only
+  `EFI_BLOCK_IO_PROTOCOL`. The host needs no Ceph client or keyring. This path
+  is not yet able to boot a VM; see
+  [`IMPLEMENTATION_STATUS.md`](uefi-edk2/IMPLEMENTATION_STATUS.md).
+
+Both paths use the same development cluster values
+(FSID `223a96f9-5a21-47e8-98a8-722553609174`, pool `rbd`/id `4`, monitor v1
+ports `40338/40340/40342`) documented in the guide.
 
 ## UEFI implementation sequence
 

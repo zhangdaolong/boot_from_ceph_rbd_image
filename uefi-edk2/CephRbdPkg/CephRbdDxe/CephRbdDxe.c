@@ -4,6 +4,7 @@
 #include <Library/UefiBootServicesTableLib.h>
 #include <Protocol/BlockIo.h>
 #include <Protocol/DriverBinding.h>
+#include "CephRbdAuth.h"
 #include "CephRbdBlockIo.h"
 #include "CephRbdConfig.h"
 #include "CephRbdDxe.h"
@@ -165,14 +166,21 @@ CephRbdDriverInitialize (
   IN UINT32                                 PoolId,
   IN CONST CHAR8                            *ImageName,
   IN UINTN                                  ImageNameLength,
-  IN CONST UINT8                            *Fsid
+  IN CONST UINT8                            *Fsid,
+  IN CONST CHAR8                            *Identity,
+  IN UINTN                                  IdentityLength,
+  IN CONST UINT8                            *Secret,
+  IN UINTN                                  SecretLength
   )
 {
-  EFI_STATUS  Status;
-  UINT64      LastLba;
+  EFI_STATUS              Status;
+  UINT64                  LastLba;
+  CEPH_RBD_AUTH_SESSION   Session;
 
   if ((Driver == NULL) || (Config == NULL) || (ControllerHandle == NULL) ||
-      (ImageName == NULL) || (Fsid == NULL))
+      (ImageName == NULL) || (Fsid == NULL) ||
+      (Identity == NULL) || (IdentityLength == 0) ||
+      (Secret == NULL))
   {
     return EFI_INVALID_PARAMETER;
   }
@@ -192,8 +200,33 @@ CephRbdDriverInitialize (
     return Status;
   }
 
+  // Authenticate the monitor session before any MON/OSD RPC. Without this
+  // step the monitor dispatches but drops every request with
+  // "is not authenticated". The CephX secret must be the raw 16-byte AES-128
+  // key; a key reference requires a platform-specific secret resolver.
   Driver->State = CephRbdStateMonitoring;
   Driver->State = CephRbdStateAuthenticating;
+  Status = CephRbdAuthHandshake (
+             &Driver->Client,
+             Identity,
+             IdentityLength,
+             Secret,
+             SecretLength,
+             &Session
+             );
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR,
+            "CephRbdDxe: CephX authentication failed with %d\n",
+            (INT32)Status
+            ));
+    CephRbdMsgrV1ClientClose (
+      &Driver->Client,
+      Driver->ConnectConfig.TimeoutSeconds
+      );
+    Driver->State = CephRbdStateFailed;
+    return Status;
+  }
+
   Driver->State = CephRbdStateMappingImage;
   Status = CephRbdBlockIoDiscover (
              &Driver->Client,
@@ -338,10 +371,20 @@ CephRbdDriverBindingStart (
     ConnectConfig.SupportedFeatures = 0x0F;
     ConnectConfig.RequiredFeatures = 0;
     ConnectConfig.HostType = CEPH_MSGR_CONNECT_HOST_CLIENT;
-    ConnectConfig.ProtocolVersion = 6;
+    ConnectConfig.ProtocolVersion = 15;  // CEPH_MONC_PROTOCOL
     ConnectConfig.AuthorizerProtocol = 0;
     ConnectConfig.Flags = 0;
     ConnectConfig.TimeoutSeconds = 5;
+
+    // CephRbdAuthHandshake needs the raw 16-byte AES-128 secret. The config
+    // Key field carries raw key bytes unless the KEY_REFERENCE flag is set,
+    // in which case resolving it requires platform-specific protected storage
+    // that a generic DXE driver cannot provide.
+    if ((Config.Flags & CEPH_RBD_CONFIG_FLAG_KEY_REFERENCE) != 0) {
+      DEBUG ((DEBUG_ERROR,
+              "CephRbdDxe: key references are not supported by this driver\n"));
+      return EFI_UNSUPPORTED;
+    }
 
     Status = CephRbdDriverInitialize (
                &mCephRbdDriver,
@@ -350,7 +393,11 @@ CephRbdDriverBindingStart (
                Config.PoolId,
                Config.ImageName,
                Config.ImageNameLength,
-               Config.Fsid
+               Config.Fsid,
+               Config.Identity,
+               Config.IdentityLength,
+               Config.Key,
+               Config.KeyLength
                );
     if (!EFI_ERROR (Status)) {
       return EFI_SUCCESS;

@@ -651,7 +651,7 @@ CephXComputeAesChallengeResponse (
   CEPH_WIRE_WRITER  Writer;
   CEPH_WIRE_CURSOR  Cursor;
   EFI_STATUS        Status;
-  UINT8             Challenge[17];
+  UINT8             Challenge[16];
   UINT8             Encoded[64];
   UINTN             EncodedLength;
   UINT64            Word;
@@ -665,11 +665,11 @@ CephXComputeAesChallengeResponse (
     return EFI_UNSUPPORTED;
   }
 
+  // CephXChallengeBlob::encode emits only the two u64 challenges; the outer
+  // struct_v/magic wrapper is added by CephXEncryptAes128Payload. Adding a
+  // struct_v here would produce a different AES plaintext and the monitor
+  // would reject the response with EACCES.
   Status = CephWireWriterInit (&Writer, Challenge, sizeof (Challenge));
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteU8 (&Writer, 1);
-  }
-
   if (!EFI_ERROR (Status)) {
     Status = CephWireWriteLe64 (&Writer, ServerChallenge);
   }

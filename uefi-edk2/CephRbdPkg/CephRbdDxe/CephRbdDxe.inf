@@ -29,6 +29,8 @@
   CephRbdMsgrV1Recovery.h
   CephRbdRpc.c
   CephRbdRpc.h
+  CephRbdAuth.c
+  CephRbdAuth.h
   CephRbdBlockIo.c
   CephRbdBlockIo.h
   CephRbdLayout.c

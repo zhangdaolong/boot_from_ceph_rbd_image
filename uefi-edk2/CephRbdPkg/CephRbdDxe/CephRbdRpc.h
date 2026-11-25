@@ -6,6 +6,7 @@
 #include "CephRbdMsgrV1Recovery.h"
 
 // Message types from include/msgr.h and ceph_fs.h.
+#define CEPH_MSG_MON_MAP              4
 #define CEPH_MSG_MON_GET_MAP          5
 #define CEPH_MSG_MON_COMMAND          50
 #define CEPH_MSG_MON_COMMAND_ACK      51
@@ -102,6 +103,16 @@ CephRpcDecodeMonCommandAck (
 // Decode the leading epoch field of a CEPH_MSG_OSD_MAP front payload.
 EFI_STATUS
 CephRpcDecodeOsdMapEpoch (
+  IN CONST VOID  *Buffer,
+  IN UINTN       BufferLength,
+  OUT UINT64     *Epoch
+  );
+
+// Decode the epoch of a CEPH_MSG_MON_MAP front payload (the reply to
+// MON_GET_MAP). The front carries one encoded bufferlist: ENCODE_START(10,6),
+// fsid (16 bytes), then the signed epoch (le32).
+EFI_STATUS
+CephRpcDecodeMonMapEpoch (
   IN CONST VOID  *Buffer,
   IN UINTN       BufferLength,
   OUT UINT64     *Epoch

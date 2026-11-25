@@ -1,0 +1,188 @@
+// Live protocol probe: connects to a Ceph messenger v1 endpoint with the
+// firmware wire sources, optionally performs the CephX MAuth handshake, then
+// issues MON_GET_MAP. Run on a host that can reach the cluster's v1 monitor
+// port. This is a validation tool, not firmware.
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <Uefi.h>
+#include "CephRbdMessenger.h"
+#include "CephRbdMsgrV1Recovery.h"
+#include "CephRbdRpc.h"
+#include "CephRbdAuth.h"
+
+EFI_BOOT_SERVICES *gBS = NULL;
+
+// Decode a 32-hex-digit AES-128 secret into 16 raw bytes. Returns 0 on success.
+static int
+ParseSecret (const char *Hex, UINT8 *Out, UINTN OutCapacity)
+{
+  UINTN Index;
+  char  Pair[3];
+
+  if ((Hex == NULL) || (Out == NULL) || (OutCapacity < CEPHX_AES_KEY_SIZE)) {
+    return -1;
+  }
+  if (strlen (Hex) != (CEPHX_AES_KEY_SIZE * 2)) {
+    return -1;
+  }
+
+  for (Index = 0; Index < CEPHX_AES_KEY_SIZE; Index++) {
+    Pair[0] = Hex[Index * 2];
+    Pair[1] = Hex[Index * 2 + 1];
+    Pair[2] = 0;
+    if (((Pair[0] < '0' || Pair[0] > '9') &&
+         (Pair[0] < 'a' || Pair[0] > 'f') &&
+         (Pair[0] < 'A' || Pair[0] > 'F')) ||
+        ((Pair[1] < '0' || Pair[1] > '9') &&
+         (Pair[1] < 'a' || Pair[1] > 'f') &&
+         (Pair[1] < 'A' || Pair[1] > 'F')))
+    {
+      return -1;
+    }
+    Out[Index] = (UINT8)strtoul (Pair, NULL, 16);
+  }
+
+  return 0;
+}
+
+int
+main (
+  int    argc,
+  char **argv
+  )
+{
+  CEPH_RBD_MSGR_V1_CLIENT          Client;
+  CEPH_RBD_MSGR_V1_CONNECT_CONFIG  Config;
+  CEPH_RBD_AUTH_SESSION            Session;
+  CEPH_MON_REQUEST_HEADER          Header;
+  UINT8                            Fsid[16];
+  UINT8                            Secret[CEPHX_AES_KEY_SIZE];
+  UINT8                            Request[256];
+  UINT8                            Reply[4096];
+  UINTN                            RequestLength;
+  UINTN                            ReplyLength;
+  UINT64                           Epoch;
+  EFI_STATUS                       Status;
+  UINT16                           Port;
+  const char                      *Identity;
+
+  // usage: live_probe <port> [address-hex] [identity] [secret-hex]
+  if (argc < 2) {
+    fprintf (stderr,
+             "usage: live_probe <port> [address-hex] [identity] [secret-hex]\n"
+             "  address-hex : 32 hex digits of cluster fsid (optional)\n"
+             "  identity    : client id, e.g. firmware01 (optional)\n"
+             "  secret-hex  : 32 hex digits of the AES-128 secret (optional)\n"
+             "Authentication is performed only when identity and secret are given.\n");
+    return 2;
+  }
+
+  Port = (UINT16)strtoul (argv[1], NULL, 10);
+  memset (Fsid, 0, sizeof (Fsid));
+  if (argc >= 3) {
+    // Cluster fsid as 32 hex digits for protocol diagnostics only.
+    const char *Hex = argv[2];
+    UINTN       Index;
+    for (Index = 0; (Index < 16) && (Hex[Index * 2] != 0); Index++) {
+      char Pair[3] = { Hex[Index * 2], Hex[Index * 2 + 1], 0 };
+      Fsid[Index] = (UINT8)strtoul (Pair, NULL, 16);
+    }
+  }
+
+  Identity = (argc >= 4) ? argv[3] : NULL;
+  if (argc >= 5) {
+    if (ParseSecret (argv[4], Secret, sizeof (Secret)) != 0) {
+      fprintf (stderr, "invalid secret: expected 32 hex digits\n");
+      return 2;
+    }
+  } else {
+    Identity = NULL;
+  }
+
+  memset (&Config, 0, sizeof (Config));
+  Config.ImageHandle = (EFI_HANDLE)&Client;
+  Config.ControllerHandle = (EFI_HANDLE)&Config;
+  Config.RemoteAddress.Addr[0] = 192;
+  Config.RemoteAddress.Addr[1] = 168;
+  Config.RemoteAddress.Addr[2] = 122;
+  Config.RemoteAddress.Addr[3] = 89;
+  Config.RemotePort = (Port != 0) ? Port : 40338;
+  Config.SupportedFeatures = ~UINT64_C(0);
+  Config.HostType = CEPH_MSGR_CONNECT_HOST_CLIENT;
+  Config.ProtocolVersion = 15;  // CEPH_MONC_PROTOCOL
+  Config.AuthorizerProtocol = 0;
+  Config.TimeoutSeconds = 5;
+
+  Status = CephRbdMsgrV1ClientConnect (&Config, &Client);
+  printf ("connect: status=%d seq=%llu/%llu tag=%u action=%d\n",
+          Status,
+          (unsigned long long)Client.Session.NextOutgoingSequence,
+          (unsigned long long)Client.Session.LastIncomingSequence,
+          Client.Negotiation.ConnectReply.Tag,
+          Client.Negotiation.Action);
+  if (EFI_ERROR (Status)) {
+    return 1;
+  }
+
+  if (Identity != NULL) {
+    Status = CephRbdAuthHandshake (
+               &Client,
+               (CONST CHAR8 *)Identity,
+               strlen (Identity),
+               Secret,
+               sizeof (Secret),
+               &Session
+               );
+    printf ("auth: status=%d global_id=%llu has_session_key=%d\n",
+            Status,
+            (unsigned long long)Session.GlobalId,
+            Session.HasSessionKey);
+    if (EFI_ERROR (Status)) {
+      CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
+      return 1;
+    }
+  }
+
+  Header.HaveVersion = 0;
+  Header.SessionMon = 0;
+  Header.SessionMonTid = 0;
+  Status = CephRpcEncodeMonGetMap (
+             &Header, Fsid, 0, Request, sizeof (Request), &RequestLength
+             );
+  if (EFI_ERROR (Status)) {
+    printf ("encode: status=%d\n", Status);
+    CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
+    return 1;
+  }
+
+  // MON_GET_MAP is answered with a MonMap (CEPH_MSG_MON_MAP=4), not an OSDMap.
+  Status = CephRpcCall (
+             &Client,
+             CEPH_MSG_MON_GET_MAP,
+             CEPH_MSG_MON_MAP,
+             Request,
+             RequestLength,
+             NULL,
+             0,
+             Reply,
+             sizeof (Reply),
+             &ReplyLength,
+             NULL,
+             0,
+             NULL
+             );
+  printf ("get_map: status=%d reply_len=%lu\n",
+          Status, (unsigned long)ReplyLength);
+  if (EFI_ERROR (Status)) {
+    CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
+    return 1;
+  }
+
+  Status = CephRpcDecodeMonMapEpoch (Reply, ReplyLength, &Epoch);
+  printf ("epoch: status=%d value=%llu\n",
+          Status, (unsigned long long)Epoch);
+  CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
+  return EFI_ERROR (Status) ? 1 : 0;
+}
