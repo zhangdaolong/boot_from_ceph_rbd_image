@@ -12,6 +12,8 @@
   CephRbdWire.h
   CephRbdMessenger.c
   CephRbdMessenger.h
+  CephRbdTcp4.c
+  CephRbdTcp4.h
   CephRbdCephX.c
   CephRbdCephX.h
   CephRbdLayout.c
@@ -36,6 +38,8 @@
 
 [Protocols]
   gEfiLoadedImageProtocolGuid
+  gEfiTcp4ProtocolGuid
+  gEfiTcp4ServiceBindingProtocolGuid
 
 [Depex]
   TRUE

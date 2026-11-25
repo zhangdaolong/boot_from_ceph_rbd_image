@@ -9,6 +9,8 @@
 #include "CephRbdWire.h"
 #include "ceph_stage2.h"
 
+void TestTcp4Transport(void);
+
 static void
 WriteLe32(uint8_t *Buffer, uint32_t Value)
 {
@@ -457,6 +459,7 @@ main(void)
   TestMessengerConnect();
   TestRbdFormat2();
   TestBiosStage2();
-  puts("core firmware parser tests: passed");
+  TestTcp4Transport();
+  puts("core firmware tests: passed");
   return 0;
 }
