@@ -1,7 +1,7 @@
 // Live protocol probe: connects to a Ceph messenger v1 endpoint with the
 // firmware wire sources, optionally performs the CephX MAuth handshake, then
-// issues MON_GET_MAP. Run on a host that can reach the cluster's v1 monitor
-// port. This is a validation tool, not firmware.
+// issues MON_GET_MAP and "osd getmap". Run on a host that can reach the
+// cluster's v1 monitor port. This is a validation tool, not firmware.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,8 +11,13 @@
 #include "CephRbdMsgrV1Recovery.h"
 #include "CephRbdRpc.h"
 #include "CephRbdAuth.h"
+#include "CephRbdPlacement.h"
 
 EFI_BOOT_SERVICES *gBS = NULL;
+
+// The canonical OSDMap blob sent as command reply data can exceed 4 KiB.
+static UINT8 mOsdMapReply[CEPH_RPC_FRAME_MAX];
+static UINT8 mOsdMapData[CEPH_RPC_FRAME_MAX];
 
 // Decode a 32-hex-digit AES-128 secret into 16 raw bytes. Returns 0 on success.
 static int
@@ -183,6 +188,89 @@ main (
   Status = CephRpcDecodeMonMapEpoch (Reply, ReplyLength, &Epoch);
   printf ("epoch: status=%d value=%llu\n",
           Status, (unsigned long long)Epoch);
+  if (EFI_ERROR (Status)) {
+    CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
+    return 1;
+  }
+
+  // Fetch the canonical OSDMap through the "osd getmap" monitor command.
+  // MON_GET_MAP above only returns a MonMap, so a separate request is needed.
+  {
+    static const char Command[] = "{\"prefix\":\"osd getmap\"}";
+    CEPH_RBD_PLACEMENT  Placement;
+    INT32               OsdIds[CEPH_RBD_CRUSH_MAX_RESULT];
+    UINTN               OsdCount;
+    UINTN               CommandReplyLength;
+    UINTN               OsdMapLength;
+    INT32               Result;
+    UINT32              Pg;
+
+    Status = CephRpcEncodeMonCommand (
+               &Header, Fsid, Command, sizeof (Command) - 1,
+               Request, sizeof (Request), &RequestLength
+               );
+    if (EFI_ERROR (Status)) {
+      printf ("osd_getmap encode: status=%d\n", Status);
+      CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
+      return 1;
+    }
+
+    Status = CephRpcCall (
+               &Client,
+               CEPH_MSG_MON_COMMAND,
+               CEPH_MSG_MON_COMMAND_ACK,
+               Request,
+               RequestLength,
+               NULL,
+               0,
+               mOsdMapReply,
+               sizeof (mOsdMapReply),
+               &CommandReplyLength,
+               mOsdMapData,
+               sizeof (mOsdMapData),
+               &OsdMapLength
+               );
+    printf ("osd_getmap: status=%d reply_len=%lu map_len=%lu\n",
+            Status, (unsigned long)CommandReplyLength,
+            (unsigned long)OsdMapLength);
+    if (EFI_ERROR (Status)) {
+      CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
+      return 1;
+    }
+
+    Status = CephRpcDecodeMonCommandAck (
+               mOsdMapReply, CommandReplyLength, &Result, NULL, NULL
+               );
+    printf ("osd_getmap ack: status=%d result=%d\n", Status, Result);
+    if (EFI_ERROR (Status) || (Result != 0)) {
+      CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
+      return 1;
+    }
+
+    Status = CephRbdPlacementFromOsdMap (
+               mOsdMapData, OsdMapLength, 4, &Placement
+               );
+    printf ("placement: status=%d epoch=%llu pg_num=%u pgp_num=%u "
+            "rule=%d size=%u flags=0x%x\n",
+            Status, (unsigned long long)Placement.Epoch,
+            Placement.PgNum, Placement.PgpNum,
+            Placement.CrushRule, Placement.Size, Placement.Flags);
+    if (EFI_ERROR (Status)) {
+      CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
+      return 1;
+    }
+
+    Status = CephRbdPlacementMapObject (
+               &Placement, "foo", 3, &Pg, NULL,
+               OsdIds, CEPH_RBD_CRUSH_MAX_RESULT, &OsdCount
+               );
+    printf ("object foo: status=%d pg=%u osd_count=%lu acting=[%d,%d,%d]\n",
+            Status, Pg, (unsigned long)OsdCount,
+            OsdCount > 0 ? OsdIds[0] : -1,
+            OsdCount > 1 ? OsdIds[1] : -1,
+            OsdCount > 2 ? OsdIds[2] : -1);
+  }
+
   CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
   return EFI_ERROR (Status) ? 1 : 0;
 }

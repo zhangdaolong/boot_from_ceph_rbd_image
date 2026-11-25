@@ -80,7 +80,7 @@ CephRpcEncodeMonCommand (
     return EFI_INVALID_PARAMETER;
   }
 
-  RequiredLength = CEPH_MON_REQUEST_HEADER_SIZE + CEPH_FSID_SIZE +
+  RequiredLength = CEPH_PAXOS_REQUEST_HEADER_SIZE + CEPH_FSID_SIZE +
                    sizeof (UINT32) + sizeof (UINT32) + CommandLength;
   *EncodedLength = 0;
   if (BufferLength < RequiredLength) {
@@ -88,12 +88,17 @@ CephRpcEncodeMonCommand (
   }
 
   Status = CephWireWriterInit (&Writer, Buffer, BufferLength);
+  // MMonCommand::encode_payload() starts with paxos_encode(): version (u64),
+  // deprecated_session_mon (__s16), deprecated_session_mon_tid (u64). Using a
+  // 32-bit session_mon field here shifts the fsid and the command vector by
+  // two bytes; the monitor then reads a bogus vector size and drops the
+  // connection with "failed to decode message of type 50 ... End of buffer".
   if (!EFI_ERROR (Status)) {
     Status = CephWireWriteLe64 (&Writer, Header->HaveVersion);
   }
 
   if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe16 (&Writer, Header->SessionMon);
+    Status = CephWireWriteLe16 (&Writer, (UINT16)Header->SessionMon);
   }
 
   if (!EFI_ERROR (Status)) {
@@ -153,9 +158,9 @@ CephRpcDecodeMonCommandAck (
     return Status;
   }
 
-  // MMonCommandAck::decode_payload: paxos_decode (version u64),
-  // result (int32), rs (string), cmd (vector<string>).
-  Status = CephWireSkip (&Cursor, sizeof (UINT64));
+  // MMonCommandAck::decode_payload: paxos_decode (u64 version, __s16
+  // session_mon, u64 tid), result (int32), rs (string), cmd (vector<string>).
+  Status = CephWireSkip (&Cursor, CEPH_PAXOS_REQUEST_HEADER_SIZE);
   if (!EFI_ERROR (Status)) {
     Status = CephWireReadLe32 (&Cursor, &RawResult);
   }
@@ -742,8 +747,8 @@ CephRpcCall (
   EFI_STATUS          Status;
   CEPH_MSGR_V1_FRAME  Outgoing;
   CEPH_MSGR_V1_FRAME  Incoming;
-  UINT8               FrameBuffer[CEPH_MSGR_V1_RETRANSMIT_FRAME_MAX];
-  UINT8               ReplyBuffer[CEPH_MSGR_V1_RETRANSMIT_FRAME_MAX];
+  UINT8               FrameBuffer[CEPH_RPC_FRAME_MAX];
+  UINT8               ReplyBuffer[CEPH_RPC_FRAME_MAX];
   UINTN               FrameLength;
   UINTN               ReplyLength;
   UINT64              RequestId;
@@ -798,6 +803,8 @@ CephRpcCall (
     // 22). Matching requests and replies synchronously therefore has to rely
     // on the message type only; the driver issues one RPC at a time.
     if (Incoming.Type != ExpectedReplyType) {
+      // A monitor assigns its own tid to replies; one RPC is issued at a time,
+      // so unrelated control messages are simply skipped here.
       continue;
     }
 

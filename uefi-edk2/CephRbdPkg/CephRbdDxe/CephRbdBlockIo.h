@@ -5,6 +5,7 @@
 #include "CephRbdFormat2.h"
 #include "CephRbdMsgrV1Recovery.h"
 #include "CephRbdRpc.h"
+#include "CephRbdPlacement.h"
 
 #define CEPH_RBD_BLOCK_SIZE                  512
 #define CEPH_RBD_MAX_READ_BLOCKS             ((CEPH_MSGR_V1_RETRANSMIT_FRAME_MAX - \
@@ -25,8 +26,24 @@ typedef struct {
   UINT32                     ClientIncarnation;
   UINT32                     OsdEpoch;
   CEPH_RBD_FORMAT2_IMAGE     Image;
+  CEPH_RBD_PLACEMENT         Placement;
+  INT32                      PrimaryOsd;
   BOOLEAN                    Ready;
 } CEPH_RBD_BLOCK_DEVICE;
+
+// Map a data object of an open image to its acting OSD set. Exposed so the
+// driver and tests can verify placement independently of a live OSD session.
+EFI_STATUS
+CephRbdBlockIoGetObjectPlacement (
+  IN  CONST CEPH_RBD_BLOCK_DEVICE  *Device,
+  IN  CONST CHAR8                  *ObjectName,
+  IN  UINTN                        ObjectNameLength,
+  OUT UINT32                       *Pg,  OPTIONAL
+  OUT UINT32                       *Pps,  OPTIONAL
+  OUT INT32                        *OsdIds,
+  IN  UINTN                        OsdIdsCapacity,
+  OUT UINTN                        *OsdIdCount
+  );
 
 // Discover image metadata through monitor/OSD RPCs. The caller supplies a
 // live, authenticated messenger client. Only format 2 images with supported

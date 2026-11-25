@@ -17,6 +17,7 @@ typedef uint32_t UINT32;
 typedef uint64_t UINT64;
 typedef size_t UINTN;
 typedef int32_t INT32;
+typedef int64_t INT64;
 typedef char CHAR8;
 typedef uint16_t CHAR16;
 typedef uint8_t BOOLEAN;

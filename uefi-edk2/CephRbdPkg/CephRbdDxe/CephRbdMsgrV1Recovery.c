@@ -310,7 +310,7 @@ CephRbdMsgrV1ApplySequences (
                   &Client->Session,
                   Connection,
                   Negotiation,
-                  CEPH_MSGR_V1_RETRANSMIT_FRAME_MAX,
+                  CEPH_MSGR_V1_SESSION_FRAME_MAX,
                   Config->TimeoutSeconds
                   );
       return EFI_ERROR (*Status) ? CephRecoveryFailed : CephRecoveryDone;
@@ -427,7 +427,7 @@ CephRbdMsgrV1FinishSeqRecovery (
   ZeroMem (Session, sizeof (*Session));
   Session->Connection = &Client->Connection;
   Session->NextOutgoingSequence = NewlyAckedSequence + 1;
-  Session->MaximumPayload = CEPH_MSGR_V1_RETRANSMIT_FRAME_MAX;
+  Session->MaximumPayload = CEPH_MSGR_V1_SESSION_FRAME_MAX;
   Session->TimeoutSeconds = Config->TimeoutSeconds;
   Session->Ready = TRUE;
   Client->Negotiation.Ready = TRUE;

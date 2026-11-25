@@ -27,7 +27,13 @@
 #define CEPH_OSD_OP_FLAG_FADVISE_READAHEAD 0x0001
 
 // Wire sizes.
-#define CEPH_MON_REQUEST_HEADER_SIZE  18   // u64 have_version, u16 session_mon, u64 tid
+// PaxosServiceMessage::paxos_encode() emits u64 version, __s16
+// deprecated_session_mon and u64 deprecated_session_mon_tid.  MMonGetMap,
+// MMonCommand and MMonCommandAck all share this 18-byte prefix; the session
+// mon field is a *signed 16-bit* value in Ceph (verified against Ceph 22
+// messages/PaxosServiceMessage.h), not a 32-bit field.
+#define CEPH_PAXOS_REQUEST_HEADER_SIZE  18
+#define CEPH_MON_REQUEST_HEADER_SIZE  CEPH_PAXOS_REQUEST_HEADER_SIZE
 #define CEPH_FSID_SIZE                16
 #define CEPH_OSD_OP_SIZE              38
 #define CEPH_RPC_MAX_COMMAND          4096
@@ -36,6 +42,9 @@
 #define CEPH_RPC_MAX_INDATA           2048
 #define CEPH_RPC_MAX_METADATA         4096
 #define CEPH_RPC_DEFAULT_OSD_EPOCH    1
+// A full OSDMap front payload can exceed the retransmit frame size (a small
+// cluster already produces ~4 KiB), so RPC uses its own larger receive buffer.
+#define CEPH_RPC_FRAME_MAX            (16 * 1024)
 
 typedef struct {
   UINT64  HaveVersion;

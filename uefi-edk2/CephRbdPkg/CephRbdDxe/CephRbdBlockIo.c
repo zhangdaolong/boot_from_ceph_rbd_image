@@ -27,30 +27,45 @@ CephRbdAsciiStrLen (
   return Length;
 }
 
+// A full OSDMap is larger than the per-call stack budget, so use static
+// buffers; only one firmware driver instance is active at a time.
+STATIC UINT8 mCephRbdOsdMapReply[CEPH_RPC_FRAME_MAX];
+STATIC UINT8 mCephRbdOsdMapData[CEPH_RPC_FRAME_MAX];
+
+// MON_GET_MAP returns a MonMap, not an OSDMap (verified on Ceph 22). The
+// "osd getmap" monitor command returns the canonical OSDMap blob as reply
+// data, which is exactly what CephRbdPlacementFromOsdMap decodes.
+#define CEPH_RBD_GET_OSDMAP_COMMAND  "{\"prefix\":\"osd getmap\"}"
+
 STATIC
 EFI_STATUS
 CephRbdBlockIoGetOsdMap (
   IN OUT CEPH_RBD_MSGR_V1_CLIENT  *Client,
   IN CONST UINT8                  *Fsid,
-  OUT UINT64                      *Epoch
+  IN INT32                        PoolId,
+  OUT UINT64                      *Epoch,
+  OUT CEPH_RBD_PLACEMENT          *Placement
   )
 {
   EFI_STATUS              Status;
   CEPH_MON_REQUEST_HEADER Header;
-  UINT8                   Request[CEPH_MON_REQUEST_HEADER_SIZE +
-                                  CEPH_FSID_SIZE + sizeof (UINT32)];
-  UINT8                   Reply[256];
+  UINT8                   Request[CEPH_PAXOS_REQUEST_HEADER_SIZE +
+                                  CEPH_FSID_SIZE + sizeof (UINT32) * 2 +
+                                  sizeof (CEPH_RBD_GET_OSDMAP_COMMAND)];
   UINTN                   RequestLength;
   UINTN                   ReplyLength;
+  UINTN                   DataLength;
+  INT32                   Result;
 
   Header.HaveVersion = 0;
   Header.SessionMon = 0;
   Header.SessionMonTid = 0;
 
-  Status = CephRpcEncodeMonGetMap (
+  Status = CephRpcEncodeMonCommand (
              &Header,
              Fsid,
-             0,
+             CEPH_RBD_GET_OSDMAP_COMMAND,
+             sizeof (CEPH_RBD_GET_OSDMAP_COMMAND) - 1,
              Request,
              sizeof (Request),
              &RequestLength
@@ -61,24 +76,43 @@ CephRbdBlockIoGetOsdMap (
 
   Status = CephRpcCallAuto (
              Client,
-             CEPH_MSG_MON_GET_MAP,
-             CEPH_MSG_OSD_MAP,
+             CEPH_MSG_MON_COMMAND,
+             CEPH_MSG_MON_COMMAND_ACK,
              Request,
              RequestLength,
              NULL,
              0,
-             Reply,
-             sizeof (Reply),
+             mCephRbdOsdMapReply,
+             sizeof (mCephRbdOsdMapReply),
              &ReplyLength,
-             NULL,
-             0,
-             NULL
+             mCephRbdOsdMapData,
+             sizeof (mCephRbdOsdMapData),
+             &DataLength
              );
   if (EFI_ERROR (Status)) {
     return Status;
   }
 
-  return CephRpcDecodeOsdMapEpoch (Reply, ReplyLength, Epoch);
+  Status = CephRpcDecodeMonCommandAck (
+             mCephRbdOsdMapReply, ReplyLength, &Result, NULL, NULL
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if (Result != 0) {
+    return EFI_DEVICE_ERROR;
+  }
+
+  Status = CephRbdPlacementFromOsdMap (
+             mCephRbdOsdMapData, DataLength, PoolId, Placement
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  *Epoch = Placement->Epoch;
+  return EFI_SUCCESS;
 }
 
 EFI_STATUS
@@ -396,7 +430,9 @@ CephRbdBlockIoDiscover (
   Device->ImageNameLength = ImageNameLength;
   CopyMem (Device->Fsid, Fsid, CEPH_FSID_SIZE);
 
-  Status = CephRbdBlockIoGetOsdMap (Client, Fsid, &OsdEpoch);
+  Status = CephRbdBlockIoGetOsdMap (
+             Client, Fsid, (INT32)PoolId, &OsdEpoch, &Device->Placement
+             );
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -605,6 +641,34 @@ CephRbdBlockIoDiscover (
 }
 
 EFI_STATUS
+CephRbdBlockIoGetObjectPlacement (
+  IN  CONST CEPH_RBD_BLOCK_DEVICE  *Device,
+  IN  CONST CHAR8                  *ObjectName,
+  IN  UINTN                        ObjectNameLength,
+  OUT UINT32                       *Pg,  OPTIONAL
+  OUT UINT32                       *Pps,  OPTIONAL
+  OUT INT32                        *OsdIds,
+  IN  UINTN                        OsdIdsCapacity,
+  OUT UINTN                        *OsdIdCount
+  )
+{
+  if ((Device == NULL) || !Device->Ready || (ObjectName == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  return CephRbdPlacementMapObject (
+           &Device->Placement,
+           ObjectName,
+           ObjectNameLength,
+           Pg,
+           Pps,
+           OsdIds,
+           OsdIdsCapacity,
+           OsdIdCount
+           );
+}
+
+EFI_STATUS
 CephRbdBlockIoReadBlocks (
   IN OUT CEPH_RBD_MSGR_V1_CLIENT  *Client,
   IN OUT CEPH_RBD_BLOCK_DEVICE    *Device,
@@ -620,6 +684,10 @@ CephRbdBlockIoReadBlocks (
   UINT64             Remaining;
   UINTN              Copied;
   UINTN              ObjectNameLength;
+  UINTN              OsdCount;
+  UINT32             Pg;
+  UINT32             Pps;
+  INT32              OsdIds[CEPH_RBD_CRUSH_MAX_RESULT];
   UINT8              ObjectName[CEPH_RBD_MAX_OBJECT_NAME];
   UINT8              Request[CEPH_RPC_MAX_METADATA];
   UINT8              Front[CEPH_RPC_MAX_METADATA];
@@ -671,6 +739,26 @@ CephRbdBlockIoReadBlocks (
     if (EFI_ERROR (Status)) {
       return Status;
     }
+
+    // Resolve the object's acting set from the OSDMap. The primary is the
+    // first OSD in the set. Routing the OSD op requires a per-OSD messenger
+    // session with an OSD service ticket, which is a separate step; for now
+    // the primary is recorded and the op uses the existing connected session.
+    Status = CephRbdPlacementMapObject (
+               &Device->Placement,
+               (CONST CHAR8 *)ObjectName,
+               ObjectNameLength,
+               &Pg,
+               &Pps,
+               OsdIds,
+               CEPH_RBD_CRUSH_MAX_RESULT,
+               &OsdCount
+               );
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+
+    Device->PrimaryOsd = OsdIds[0];
 
     ZeroMem (&Op, sizeof (Op));
     Op.Op = CEPH_OSD_OP_READ;

@@ -17,6 +17,8 @@ void TestRpcCodecs(void);
 void TestBlockIo(void);
 void TestConfigAndDriverBinding(void);
 void TestAuthCodecs(void);
+void TestCrushPlacement(void);
+void TestPlacement(void);
 
 static void
 WriteLe32(uint8_t *Buffer, uint32_t Value)
@@ -486,6 +488,8 @@ main(void)
   TestBlockIo();
   TestConfigAndDriverBinding();
   TestAuthCodecs();
+  TestCrushPlacement();
+  TestPlacement();
   puts("core firmware tests: passed");
   return 0;
 }

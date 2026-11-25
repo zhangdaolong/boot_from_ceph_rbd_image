@@ -14,6 +14,7 @@ cc -std=c11 -Wall -Wextra -Werror \
   -I"$repo_root/tests/host/include" \
   -I"$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe" \
   -I"$repo_root/bios/stage2" \
+  -DCRUSH_VECTOR_DIR="\"$repo_root/tests/vectors\"" \
   "$repo_root/tests/host/test_core.c" \
   "$repo_root/tests/host/test_crypto.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdDxe.c" \
@@ -23,7 +24,11 @@ cc -std=c11 -Wall -Wextra -Werror \
   "$repo_root/tests/host/test_blockio.c" \
   "$repo_root/tests/host/test_config.c" \
   "$repo_root/tests/host/test_auth.c" \
+  "$repo_root/tests/host/test_crush.c" \
+  "$repo_root/tests/host/test_placement.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdWire.c" \
+  "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdCrush.c" \
+  "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdPlacement.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdConfig.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdMessenger.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdCephX.c" \

@@ -12,6 +12,9 @@
 // deliberately bounded instead of heap-allocated.
 #define CEPH_MSGR_V1_RETRANSMIT_MAX          16
 #define CEPH_MSGR_V1_RETRANSMIT_FRAME_MAX    4096
+// Incoming frames (notably a full OSDMap) can be larger than the retransmit
+// buffer; the session accepts up to this size and RPC owns the backing buffer.
+#define CEPH_MSGR_V1_SESSION_FRAME_MAX       (16 * 1024)
 #define CEPH_MSGR_V1_MAX_CONNECT_ATTEMPTS    8
 #define CEPH_MSGR_V1_MAX_RPC_RETRIES         4
 #define CEPH_MSGR_V1_MAX_IN_SEQ_GAP          1024

@@ -6,6 +6,13 @@
 #include "CephRbdWire.h"
 
 static void
+WriteLe16 (UINT8 *Buffer, UINT16 Value)
+{
+  Buffer[0] = (UINT8)Value;
+  Buffer[1] = (UINT8)(Value >> 8);
+}
+
+static void
 WriteLe32 (UINT8 *Buffer, UINT32 Value)
 {
   Buffer[0] = (UINT8)Value;
@@ -56,34 +63,47 @@ TestMonCodecs (VOID)
   assert(CephWireReadLe32 (&Cursor, &StartEpoch) == EFI_SUCCESS);
   assert(StartEpoch == 12);
 
+  // Regression: Ceph 22 PaxosServiceMessage::paxos_encode() writes a u64
+  // version, a __s16 (not u32) session_mon and a u64 tid. A 20-byte header
+  // shifts the fsid/command vector and makes the monitor drop the connection
+  // with "failed to decode message of type 50 ... End of buffer".
+  assert(CEPH_PAXOS_REQUEST_HEADER_SIZE == 18);
   assert(CephRpcEncodeMonCommand (
            &Header, Fsid, "osd map", 7, Buffer, sizeof (Buffer), &Length) ==
          EFI_SUCCESS);
-  assert(Length == CEPH_MON_REQUEST_HEADER_SIZE + CEPH_FSID_SIZE +
+  assert(Length == CEPH_PAXOS_REQUEST_HEADER_SIZE + CEPH_FSID_SIZE +
          4 + 4 + 7);
   assert(CephWireInit (&Cursor, Buffer, Length) == EFI_SUCCESS);
-  assert(CephWireSkip (&Cursor, CEPH_MON_REQUEST_HEADER_SIZE +
-                      CEPH_FSID_SIZE) == EFI_SUCCESS);
+  assert(CephWireReadLe64 (&Cursor, &HaveVersion) == EFI_SUCCESS);
+  assert(HaveVersion == 0);
+  assert(CephWireReadLe16 (&Cursor, &SessionMon) == EFI_SUCCESS);
+  assert(SessionMon == 3);
+  assert(CephWireReadLe64 (&Cursor, &SessionMonTid) == EFI_SUCCESS);
+  assert(SessionMonTid == 0x1122334455667788ULL);
+  assert(CephWireSkip (&Cursor, CEPH_FSID_SIZE) == EFI_SUCCESS);
   assert(CephWireReadLe32 (&Cursor, &NumStrings) == EFI_SUCCESS);
   assert(NumStrings == 1);
   assert(CephWireReadLe32 (&Cursor, &StringLength) == EFI_SUCCESS);
   assert(StringLength == 7);
   assert(memcmp (Cursor.Data, "osd map", 7) == 0);
 
-  // MMonCommandAck: version u64, result s32, status string, cmd vector.
+  // MMonCommandAck: paxos header (u64, __s16, u64), result s32, status
+  // string, cmd vector.
   WriteLe64 (Buffer, 42);
-  WriteLe32 (Buffer + 8, 0);
-  WriteLe32 (Buffer + 12, 2);
-  memcpy (Buffer + 16, "ok", 2);
+  WriteLe16 (Buffer + 8, 0);
+  WriteLe64 (Buffer + 10, 0);
   WriteLe32 (Buffer + 18, 0);
+  WriteLe32 (Buffer + 22, 2);
+  memcpy (Buffer + 26, "ok", 2);
+  WriteLe32 (Buffer + 28, 0);
   assert(CephRpcDecodeMonCommandAck (
-           Buffer, 22, &Result, &OutData, &OutDataLength) == EFI_SUCCESS);
+           Buffer, 32, &Result, &OutData, &OutDataLength) == EFI_SUCCESS);
   assert(Result == 0);
   assert(OutDataLength == 0);
 
-  WriteLe32 (Buffer + 8, (UINT32)-22);
+  WriteLe32 (Buffer + 18, (UINT32)-22);
   assert(CephRpcDecodeMonCommandAck (
-           Buffer, 22, &Result, NULL, NULL) == EFI_SUCCESS);
+           Buffer, 32, &Result, NULL, NULL) == EFI_SUCCESS);
   assert(Result == -22);
 }
 

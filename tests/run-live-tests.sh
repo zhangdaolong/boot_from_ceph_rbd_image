@@ -17,6 +17,8 @@ cc -std=c11 -Wall -Wextra \
   "$repo_root/tests/live/live_tcp4.c" \
   "$repo_root/tests/host/test_crypto.c" \
   "$dxe/CephRbdWire.c" \
+  "$dxe/CephRbdCrush.c" \
+  "$dxe/CephRbdPlacement.c" \
   "$dxe/CephRbdMessenger.c" \
   "$dxe/CephRbdCephX.c" \
   "$dxe/CephRbdMsgrV1Handshake.c" \
