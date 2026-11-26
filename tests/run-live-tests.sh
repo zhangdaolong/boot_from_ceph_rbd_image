@@ -31,6 +31,7 @@ cc -std=c11 -Wall -Wextra \
   "$dxe/CephRbdOsdClient.c" \
   "$dxe/CephRbdLayout.c" \
   "$dxe/CephRbdFormat2.c" \
+  "$dxe/CephRbdGpt.c" \
   -lcrypto \
   -o "$build_dir/live_probe"
 

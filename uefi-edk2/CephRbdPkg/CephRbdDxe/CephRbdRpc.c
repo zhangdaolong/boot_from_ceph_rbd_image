@@ -881,6 +881,16 @@ CephRpcCall (
       }
     }
 
+    // Receiving the reply proves the request reached and was processed by the
+    // peer. Release it from the retransmit queue here instead of relying on a
+    // CEPH_MSGR_TAG_ACK, which OSD endpoints (lossy policy) never send. Doing
+    // this on reply receipt also avoids queue exhaustion during long reads.
+    CephMsgrV1RetransmitQueueAcknowledge (
+      &Client->Retransmit,
+      RequestId,
+      NULL
+      );
+
     return EFI_SUCCESS;
   }
 

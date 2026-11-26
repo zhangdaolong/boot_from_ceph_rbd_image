@@ -19,6 +19,7 @@ void TestConfigAndDriverBinding(void);
 void TestAuthCodecs(void);
 void TestCrushPlacement(void);
 void TestPlacement(void);
+void TestGpt(void);
 
 static void
 WriteLe32(uint8_t *Buffer, uint32_t Value)
@@ -507,6 +508,7 @@ main(void)
   TestAuthCodecs();
   TestCrushPlacement();
   TestPlacement();
+  TestGpt();
   puts("core firmware tests: passed");
   return 0;
 }

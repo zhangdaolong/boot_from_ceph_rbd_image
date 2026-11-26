@@ -44,6 +44,8 @@
   CephRbdLayout.h
   CephRbdFormat2.c
   CephRbdFormat2.h
+  CephRbdGpt.c
+  CephRbdGpt.h
 
 [Packages]
   MdePkg/MdePkg.dec

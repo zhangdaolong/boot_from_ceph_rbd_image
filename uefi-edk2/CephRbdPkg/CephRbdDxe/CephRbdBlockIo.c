@@ -867,17 +867,29 @@ CephRbdBlockIoReadBlocks (
       return EFI_DEVICE_ERROR;
     }
 
-    if ((Extent.Length > Reply.DataLength) ||
+    // RBD objects are sparse: a READ past the last byte written in an
+    // object succeeds (result=0) but returns fewer bytes than requested.
+    // librbd zero-fills that tail, and so must we. Only a reply that is
+    // LONGER than requested is genuine data corruption.
+    if ((Reply.DataLength > Extent.Length) ||
         (Copied > MAX_UINTN - (UINTN)Extent.Length))
     {
       return EFI_COMPROMISED_DATA;
     }
 
-    CopyMem (
-      (UINT8 *)Buffer + Copied,
-      Reply.Data,
-      (UINTN)Extent.Length
-      );
+    if (Reply.DataLength > 0) {
+      CopyMem (
+        (UINT8 *)Buffer + Copied,
+        Reply.Data,
+        (UINTN)Reply.DataLength
+        );
+    }
+    if (Reply.DataLength < Extent.Length) {
+      ZeroMem (
+        (UINT8 *)Buffer + Copied + (UINTN)Reply.DataLength,
+        (UINTN)Extent.Length - (UINTN)Reply.DataLength
+        );
+    }
     Copied += (UINTN)Extent.Length;
     ImageOffset += Extent.Length;
     Remaining -= Extent.Length;

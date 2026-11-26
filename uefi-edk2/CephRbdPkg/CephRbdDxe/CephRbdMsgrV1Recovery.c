@@ -653,6 +653,14 @@ CephRbdMsgrV1ClientSendTracked (
     return Status;
   }
 
+  // A lossy peer (OSD endpoints) never sends CEPH_MSGR_TAG_ACK, so tracked
+  // frames would never be released and the queue would fill after 16 RPCs.
+  // Ceph lossy connections provide no reliable-delivery guarantee, so there
+  // is nothing to replay on reconnect: skip tracking entirely.
+  if (Client->Session.Lossy) {
+    return EFI_SUCCESS;
+  }
+
   Status = CephMsgrV1RetransmitQueueTrack (
              &Client->Retransmit,
              Client->Session.NextOutgoingSequence - 1,

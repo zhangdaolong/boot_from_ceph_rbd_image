@@ -50,21 +50,16 @@ tests/                    Host-side protocol/layout/loader tests and vectors
 
 ## Booting a VM from Ceph RBD
 
-See [`docs/boot-vm-from-ceph-rbd.md`](docs/boot-vm-from-ceph-rbd.md) for the
-complete guide. In short:
+The firmware-side approach implemented here loads `CephRbdDxe.efi` in OVMF,
+which reads the RBD image itself and exposes a read-only
+`EFI_BLOCK_IO_PROTOCOL`. The host needs no Ceph client or keyring. This path is
+not yet able to boot a VM; see
+[`IMPLEMENTATION_STATUS.md`](uefi-edk2/IMPLEMENTATION_STATUS.md) and the
+[complete guide](docs/boot-vm-from-ceph-rbd.md).
 
-- **Path A — hypervisor-side RBD (works today):** QEMU/libvirt authenticates to
-  Ceph through `librbd` and presents the image as a virtio-blk disk. The guest
-  does not know the disk is RBD. Use this for a bootable VM now.
-- **Path B — firmware-side RBD (this project, in progress):** OVMF loads
-  `CephRbdDxe.efi`, which reads the image itself and exposes a read-only
-  `EFI_BLOCK_IO_PROTOCOL`. The host needs no Ceph client or keyring. This path
-  is not yet able to boot a VM; see
-  [`IMPLEMENTATION_STATUS.md`](uefi-edk2/IMPLEMENTATION_STATUS.md).
-
-Both paths use the same development cluster values
-(FSID `223a96f9-5a21-47e8-98a8-722553609174`, pool `rbd`/id `4`, monitor v1
-ports `40338/40340/40342`) documented in the guide.
+The development cluster values (FSID `223a96f9-5a21-47e8-98a8-722553609174`,
+pool `rbd`/id `4`, monitor v1 ports `40338/40340/40342`) are documented in the
+guide.
 
 ## UEFI implementation sequence
 

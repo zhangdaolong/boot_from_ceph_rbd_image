@@ -13,8 +13,34 @@
 #include "CephRbdAuth.h"
 #include "CephRbdPlacement.h"
 #include "CephRbdBlockIo.h"
+#include "CephRbdGpt.h"
 
 EFI_BOOT_SERVICES *gBS = NULL;
+
+// Adapter that lets the GPT parser read LBAs through the DXE BlockIo path.
+typedef struct {
+  CEPH_RBD_OSD_CLIENT_POOL  *Pool;
+  CEPH_RBD_BLOCK_DEVICE     *Device;
+} GPT_PROBE_CONTEXT;
+
+static EFI_STATUS
+ProbeReadLba (
+  IN     VOID   *Context,
+  IN     UINT64  Lba,
+  OUT    UINT8  *Buffer,
+  IN     UINTN   BufferSize
+  )
+{
+  GPT_PROBE_CONTEXT *Ctx = (GPT_PROBE_CONTEXT *)Context;
+
+  if ((BufferSize % CEPH_RBD_BLOCK_SIZE) != 0) {
+    return EFI_INVALID_PARAMETER;
+  }
+  return CephRbdBlockIoReadBlocks (
+           Ctx->Pool, Ctx->Device, Lba,
+           BufferSize / CEPH_RBD_BLOCK_SIZE, Buffer, BufferSize
+           );
+}
 
 // The canonical OSDMap blob sent as command reply data can exceed 4 KiB.
 static UINT8 mOsdMapReply[CEPH_RPC_FRAME_MAX];
@@ -465,14 +491,28 @@ main (
     // block reads both run through the per-OSD authenticated session pool,
     // never over the monitor connection.
     if (!EFI_ERROR (Status) && OsdAuth.Valid) {
-      static const CHAR8  DxeImage[] = "close-race-test";
-      UINT8               BlockData[512];
+      // CEPH_RBD_TEST_IMAGE lets the same probe target an image prepared with
+      // a GPT (e.g. for ESP discovery) without recompiling.
+      const char *ImageOverride = getenv ("CEPH_RBD_TEST_IMAGE");
+      CHAR8       DxeImage[CEPH_RBD_MAX_IMAGE_NAME];
+      UINTN       DxeImageLength;
+      UINT8       BlockData[512];
       UINTN               DataIndex;
+
+      if ((ImageOverride == NULL) || (ImageOverride[0] == 0)) {
+        ImageOverride = "close-race-test";
+      }
+      DxeImageLength = strlen (ImageOverride);
+      if (DxeImageLength >= sizeof (DxeImage)) {
+        DxeImageLength = sizeof (DxeImage) - 1;
+      }
+      memcpy (DxeImage, ImageOverride, DxeImageLength);
+      DxeImage[DxeImageLength] = 0;
 
       memset (&Device, 0, sizeof (Device));
       Status = CephRbdBlockIoDiscover (
                  &Client, &OsdPool, 4,
-                 DxeImage, sizeof (DxeImage) - 1,
+                 DxeImage, DxeImageLength,
                  Fsid, &Device
                  );
       printf ("dxe_discover: status=%d ready=%d image_size=%llu\n",
@@ -489,6 +529,33 @@ main (
           printf (" %02x", BlockData[DataIndex]);
         }
         printf ("\n");
+
+        // Attempt GPT/ESP discovery over the same BlockIo read path. An image
+        // without a GPT (e.g. a raw test image) simply reports the status.
+        if (!EFI_ERROR (Status)) {
+          GPT_PROBE_CONTEXT    GptCtx;
+          CEPH_RBD_GPT_PARTITION Esp;
+          UINT64               LastLba = 0;
+          CHAR16               EspPath[64];
+
+          CephRbdBlockIoGetMediaLastLba (&Device, &LastLba);
+          GptCtx.Pool = &OsdPool;
+          GptCtx.Device = &Device;
+          Status = CephRbdGptDiscoverEsp (
+                     ProbeReadLba, &GptCtx, LastLba, &Esp
+                     );
+          printf ("gpt_esp: status=%d last_lba=%llu", Status,
+                  (unsigned long long)LastLba);
+          if (!EFI_ERROR (Status)) {
+            CephRbdGptBuildEspBootPath (
+              EspPath, sizeof (EspPath) / sizeof (EspPath[0])
+              );
+            printf (" esp_lba=%llu-%llu",
+                    (unsigned long long)Esp.FirstLba,
+                    (unsigned long long)Esp.LastLba);
+          }
+          printf ("\n");
+        }
       }
 
       CephRbdOsdClientPoolClose (&OsdPool);

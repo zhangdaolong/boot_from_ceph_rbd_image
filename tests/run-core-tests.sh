@@ -26,6 +26,7 @@ cc -std=c11 -Wall -Wextra -Werror \
   "$repo_root/tests/host/test_auth.c" \
   "$repo_root/tests/host/test_crush.c" \
   "$repo_root/tests/host/test_placement.c" \
+  "$repo_root/tests/host/test_gpt.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdWire.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdCrush.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdPlacement.c" \
@@ -43,6 +44,7 @@ cc -std=c11 -Wall -Wextra -Werror \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdTcp4.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdLayout.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdFormat2.c" \
+  "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdGpt.c" \
   "$repo_root/bios/stage2/ceph_stage2.c" \
   -lcrypto \
   -o "$test_binary"

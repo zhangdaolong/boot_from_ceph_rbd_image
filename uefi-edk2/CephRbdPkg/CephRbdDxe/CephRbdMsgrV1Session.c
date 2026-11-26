@@ -165,6 +165,9 @@ CephMsgrV1SessionInit (
        Negotiation->SupportedFeatures) & CEPH_FEATURE_MSG_AUTH) != 0) ?
     CEPH_MSGR_V1_FOOTER_SIZE : CEPH_MSGR_V1_FOOTER_LEGACY_SIZE;
   Session->TimeoutSeconds = TimeoutSeconds;
+  // OSD endpoints reply with CEPH_MSG_CONNECT_LOSSY and never send ACK tags.
+  Session->Lossy =
+    ((Negotiation->ConnectReply.Flags & CEPH_MSGR_CONNECT_LOSSY) != 0);
   Session->Ready           = TRUE;
   return EFI_SUCCESS;
 }

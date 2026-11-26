@@ -17,6 +17,10 @@ typedef struct {
   // feature set at connect time and used for both send and receive.
   UINTN                     FooterSize;
   UINT32                    TimeoutSeconds;
+  // A lossy peer (CEPH_MSG_CONNECT_LOSSY in the connect reply) never sends
+  // CEPH_MSGR_TAG_ACK. Tracking such messages in the retransmit queue would
+  // fill it permanently, so callers skip tracking on lossy sessions.
+  BOOLEAN                   Lossy;
   BOOLEAN                   Ready;
 } CEPH_MSGR_V1_SESSION;
 
