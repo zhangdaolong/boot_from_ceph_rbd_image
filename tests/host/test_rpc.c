@@ -275,6 +275,18 @@ TestOsdOpCodecs (VOID)
       assert(CephWireReadLe32 (&Cursor, &PayloadLen) == EFI_SUCCESS);
       assert(PayloadLen == CallDataLength);
     }
+    // cls.indata_len sits at op+9 (u16 op, u32 flags, u8 class_len,
+    // u8 method_len, u8 argc). Ceph uses it to copy the caller's indata
+    // out of the payload slice, so it must be 5 here -- not the sum of
+    // class_len + method_len + indata_len (18).
+    {
+      UINT32 ClsIndataLen;
+
+      assert(CephWireInit (&Cursor, Front, Length) == EFI_SUCCESS);
+      assert(CephWireSkip (&Cursor, 70 + 9) == EFI_SUCCESS);
+      assert(CephWireReadLe32 (&Cursor, &ClsIndataLen) == EFI_SUCCESS);
+      assert(ClsIndataLen == 5);
+    }
   }
 }
 

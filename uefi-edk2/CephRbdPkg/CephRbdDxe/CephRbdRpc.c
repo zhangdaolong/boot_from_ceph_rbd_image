@@ -409,11 +409,12 @@ CephRpcWriteOsdOp (
         Status = CephWireWriteU8 (Writer, 0);  // argc
       }
       if (!EFI_ERROR (Status)) {
-        Status = CephWireWriteLe32 (
-                   Writer,
-                   (UINT32)(Op->ClassNameLength + Op->MethodNameLength +
-                            Op->IndataLength)
-                   );
+        // cls.indata_len is the length of the caller's indata ONLY. The class
+        // and method names are accounted for by class_len/method_len. Ceph's
+        // PrimaryLogPG::do_osd_op() does bp.copy(class_len) + bp.copy(method_len)
+        // + bp.copy(indata_len) from the (payload_len-sized) data slice; setting
+        // this to the sum makes the OSD read past the end and return -EINVAL.
+        Status = CephWireWriteLe32 (Writer, (UINT32)Op->IndataLength);
       }
       // The union is a fixed 28 bytes (sized by the extent variant); the cls
       // variant uses only 7. Pad the remaining 21 bytes so payload_len lands

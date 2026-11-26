@@ -294,6 +294,20 @@ flags = 2
   ```bash
   ceph-authtool --gen-print-key --key-type=aes
   ```
+- The identity needs the `class-read` cap on the OSD side, not just plain
+  `allow r`. The driver discovers an image through RBD metadata class methods
+  (`rbd.get_id`, `rbd.get_size`, `rbd.get_features`,
+  `rbd.get_object_prefix`); these are `CEPH_OSD_OP_CALL` ops, and Ceph rejects
+  them with `-EPERM` (`result=-1`) for a client that only has `allow r`.
+  Create the identity with the minimum caps that let the driver work:
+  ```bash
+  ceph auth get-or-create client.firmware01 \
+    mon 'allow r' \
+    osd 'allow r class-read' \
+    pool rbd 'allow r class-read'
+  ```
+  with `class-read` granted on the pool that holds the image when you use
+  per-pool caps.
 
 ### B.4 Running the OVMF smoke test (does not boot from RBD)
 
@@ -320,19 +334,34 @@ tests/live/.build/live_probe 40338 \
 ```
 
 A complete run performs messenger v1 connect (including `TAG_SEQ`), the CephX
-challenge-response handshake, then `MON_GET_MAP` and decodes the MonMap epoch:
+challenge-response handshake, then `MON_GET_MAP` and decodes the MonMap epoch.
+With an authenticated identity it goes on to request the OSDMap, place the
+object via CRUSH, connect to the primary OSD, issue a real `CEPH_OSD_OP_READ`,
+and finally drive the same DXE BlockIo discovery + read path the firmware uses:
 
 ```text
 connect: status=0 seq=1/0 tag=13 action=0
-auth: status=0 global_id=28074 has_session_key=0
+auth: status=0 global_id=28407 has_session_key=1
+osd_service_ticket: status=0 valid=1 secret_id=306 blob_len=150
 get_map: status=0 reply_len=461
 epoch: status=0 value=2
+osd_getmap: status=0 reply_len=78 map_len=4100
+placement: status=0 epoch=3765 pg_num=32 pgp_num=32 rule=0 size=3
+test object: status=0 pg=28 osd_count=3 acting=[2,1,0]
+osd_connect: osd=2 addr=192.168.122.89:6819 status=0 ready=1
+osd_read: status=0 result=0 num_ops=1 data_len=16
+dxe_discover: status=0 ready=1 image_size=1073741824
+dxe_read: status=0 data: 7d ef f3 7e 35 30 b6 60 ...
 ```
 
 `MON_GET_MAP` is answered with a **MonMap** (`CEPH_MSG_MON_MAP=4`), not an
-OSDMap; the probe decodes that message accordingly. Without the CephX step the
-monitor drops the request with `is not authenticated`, which is how the need
-for the handshake was isolated.
+OSDMap; the probe uses a separate `osd getmap` MON command for the OSDMap.
+Without the CephX step the monitor drops the request with `is not
+authenticated`, which is how the need for the handshake was isolated. The
+`dxe_discover`/`dxe_read` lines confirm the full RBD path — metadata class
+methods plus a data-block read over the primary OSD session — works against a
+real cluster. If `dxe_discover` fails with `status=-13` and the class-method
+`result=-1`, the identity is missing the `class-read` cap (see B.3).
 
 ---
 

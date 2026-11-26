@@ -6,8 +6,10 @@
 // CEPH_NOSNAP is (snapid_t)-2, not -1 (which is CEPH_SNAPDIR) in
 // include/rados.h. snapid_t is an unsigned 64-bit wire value.
 #define CEPH_RBD_SNAP_ID                 (MAX_UINT64 - 1)
-#define CEPH_RBD_ID_OBJECT_PREFIX        "rbd_id."
-#define CEPH_RBD_HEADER_OBJECT_PREFIX    "rbd_header."
+// Prefixes are given without the trailing '.' because BuildObjectName adds
+// the separator itself. Defining them with a dot would produce "rbd_id..id".
+#define CEPH_RBD_ID_OBJECT_PREFIX        "rbd_id"
+#define CEPH_RBD_HEADER_OBJECT_PREFIX    "rbd_header"
 #define CEPH_RBD_INCOMPATIBLE_FEATURES   (1ULL << 63)
 
 STATIC
