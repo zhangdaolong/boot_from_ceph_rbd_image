@@ -250,4 +250,45 @@ CephXDecodeAuthorizeChallengeSecret (
   OUT UINT64      *ServerChallenge
   );
 
+// Decode a GET_PRINCIPAL_SESSION_KEY reply's result_bl and extract the service
+// ticket for ExpectedServiceId (e.g. CEPH_ENTITY_TYPE_OSD). Both the encrypted
+// CephXServiceTicket (holding the service session key) and the encrypted
+// CephXTicketBlob are decrypted with PrincipalSessionKey -- the AUTH ticket
+// session key that anchors the principal. Only AES-128 keys are accepted.
+EFI_STATUS
+CephXDecodeServiceTicket (
+  IN  CONST VOID   *Buffer,
+  IN  UINTN        BufferLength,
+  IN  CONST UINT8  *PrincipalSessionKey,
+  IN  UINTN        PrincipalSessionKeyLength,
+  IN  UINT32       ExpectedServiceId,
+  OUT UINT8        *ServiceSessionKey,
+  IN  UINTN        ServiceSessionKeyCapacity,
+  OUT UINT64       *TicketSecretId,  OPTIONAL
+  OUT VOID         *TicketBlob,  OPTIONAL
+  IN  UINTN        TicketBlobCapacity,
+  OUT UINTN        *TicketBlobLength  OPTIONAL
+  );
+
+// Build a CephXAuthorizer blob for a service. Layout:
+//   u8 authorizer_v (=1), u64 global_id, u32 service_id,
+//   CephXTicketBlob ticket (u8 v=1, u64 secret_id, bufferlist blob),
+//   encode_encrypt(CephXAuthorize v2, SessionKey).
+// The encrypted CephXAuthorize carries a nonce and no challenge (the caller
+// can append a challenge round-trip later by re-encrypting with a nonce).
+EFI_STATUS
+CephXEncodeServiceAuthorizer (
+  IN  UINT64        GlobalId,
+  IN  UINT32        ServiceId,
+  IN  UINT64        TicketSecretId,
+  IN  CONST VOID    *TicketBlob,
+  IN  UINTN         TicketBlobLength,
+  IN  CONST UINT8   *SessionKey,
+  IN  UINTN         SessionKeyLength,
+  IN  UINT64        Nonce,
+  OUT VOID          *Buffer,
+  IN  UINTN         BufferCapacity,
+  OUT UINTN         *EncodedLength
+  );
+
 #endif

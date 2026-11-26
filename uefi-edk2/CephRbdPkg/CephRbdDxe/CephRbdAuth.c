@@ -482,3 +482,226 @@ CephRbdAuthHandshake (
 
   return EFI_SUCCESS;
 }
+
+EFI_STATUS
+CephRbdAuthEncodeServiceTicketRequest (
+  IN  UINT64                GlobalId,
+  IN  CONST CEPH_RBD_TICKET  *AuthTicket,
+  IN  CONST UINT8           *SessionKey,
+  IN  UINT64                Nonce,
+  IN  UINT32                ServiceMask,
+  OUT VOID                  *Buffer,
+  IN  UINTN                 BufferCapacity,
+  OUT UINTN                 *EncodedLength
+  )
+{
+  EFI_STATUS        Status;
+  CEPH_WIRE_WRITER  Writer;
+  UINT8             Authorizer[256];
+  UINTN             AuthorizerLength;
+
+  if ((AuthTicket == NULL) || (SessionKey == NULL) ||
+      (Buffer == NULL) || (EncodedLength == NULL))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (!AuthTicket->Valid || (AuthTicket->BlobLength == 0) ||
+      (AuthTicket->BlobLength > CEPHX_MAX_TICKET_BLOB))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *EncodedLength = 0;
+
+  // CephXAuthorizer for the AUTH service, built from the AUTH ticket.
+  Status = CephXEncodeServiceAuthorizer (
+             GlobalId,
+             CEPH_ENTITY_TYPE_AUTH_SERVICE,
+             AuthTicket->SecretId,
+             AuthTicket->Blob,
+             AuthTicket->BlobLength,
+             SessionKey,
+             CEPHX_AES_KEY_SIZE,
+             Nonce,
+             Authorizer,
+             sizeof (Authorizer),
+             &AuthorizerLength
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  // MAuth front payload.
+  Status = CephWireWriterInit (&Writer, Buffer, BufferCapacity);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  // paxos_encode(): version, deprecated_session_mon (s16 = -1), tid.
+  Status = CephWireWriteLe64 (&Writer, 0);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe16 (&Writer, (UINT16)0xFFFF);
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe64 (&Writer, 0);
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, CEPH_AUTH_CEPHX);
+  }
+
+  // auth_payload = CephXRequestHeader + CephXAuthorizer +
+  //                CephXServiceTicketRequest.
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (
+               &Writer,
+               (UINT32)(2 + AuthorizerLength + 5)
+               );
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe16 (&Writer, CEPHX_GET_PRINCIPAL_SESSION_KEY);
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteBytes (&Writer, Authorizer, AuthorizerLength);
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteU8 (&Writer, 1);   // CephXServiceTicketRequest v
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, ServiceMask);
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, 0);  // monmap_epoch
+  }
+
+  ZeroMem (Authorizer, sizeof (Authorizer));
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  *EncodedLength = Writer.Written;
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephRbdAuthGetServiceTicket (
+  IN OUT CEPH_RBD_MSGR_V1_CLIENT        *Client,
+  IN  CONST CEPH_RBD_AUTH_SESSION       *Session,
+  IN  UINT32                            ServiceId,
+  OUT CEPH_RBD_SERVICE_AUTH             *ServiceAuth
+  )
+{
+  EFI_STATUS           Status;
+  UINT8                Request[CEPH_RBD_AUTH_MAX_PAYLOAD];
+  UINT8                Reply[CEPH_RBD_AUTH_MAX_REPLY];
+  UINTN                RequestLength;
+  UINTN                ReplyLength;
+  CEPH_RBD_AUTH_REPLY  AuthReply;
+  UINT64               Nonce;
+
+  if ((Client == NULL) || (Session == NULL) || (ServiceAuth == NULL) ||
+      !Session->HasSessionKey || !Session->AuthTicket.Valid)
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  ZeroMem (ServiceAuth, sizeof (*ServiceAuth));
+
+  // A fixed nonce is acceptable: the authorizer is already bound to the
+  // ticket and session key, and messenger v1 has no replay window.
+  Nonce = 0x43455048524c444BU;  // "CEPHRLD" + 0xB
+
+  Status = CephRbdAuthEncodeServiceTicketRequest (
+             Session->GlobalId,
+             &Session->AuthTicket,
+             Session->SessionKey,
+             Nonce,
+             ServiceId,
+             Request,
+             sizeof (Request),
+             &RequestLength
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephRpcCall (
+             Client,
+             CEPH_MSG_AUTH,
+             CEPH_MSG_AUTH_REPLY,
+             Request,
+             RequestLength,
+             NULL,
+             0,
+             Reply,
+             sizeof (Reply),
+             &ReplyLength,
+             NULL,
+             0,
+             NULL
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephRbdAuthDecodeReply (Reply, ReplyLength, &AuthReply);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  if (AuthReply.Result != 0) {
+    return EFI_ACCESS_DENIED;
+  }
+
+  Status = CephXDecodeServiceTicket (
+             AuthReply.ResultBl,
+             AuthReply.ResultBlLength,
+             Session->SessionKey,
+             CEPHX_AES_KEY_SIZE,
+             ServiceId,
+             ServiceAuth->SessionKey,
+             sizeof (ServiceAuth->SessionKey),
+             &ServiceAuth->Ticket.SecretId,
+             ServiceAuth->Ticket.Blob,
+             sizeof (ServiceAuth->Ticket.Blob),
+             &ServiceAuth->Ticket.BlobLength
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  ServiceAuth->GlobalId = Session->GlobalId;
+  ServiceAuth->ServiceId = ServiceId;
+  ServiceAuth->Ticket.Valid = TRUE;
+  ServiceAuth->Valid = TRUE;
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephRbdAuthBuildServiceAuthorizer (
+  IN  CONST CEPH_RBD_SERVICE_AUTH  *ServiceAuth,
+  IN  UINT64                       Nonce,
+  OUT VOID                         *Buffer,
+  IN  UINTN                        BufferCapacity,
+  OUT UINTN                        *EncodedLength
+  )
+{
+  if ((ServiceAuth == NULL) || !ServiceAuth->Valid ||
+      (Buffer == NULL) || (EncodedLength == NULL))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  return CephXEncodeServiceAuthorizer (
+           ServiceAuth->GlobalId,
+           ServiceAuth->ServiceId,
+           ServiceAuth->Ticket.SecretId,
+           ServiceAuth->Ticket.Blob,
+           ServiceAuth->Ticket.BlobLength,
+           ServiceAuth->SessionKey,
+           CEPHX_AES_KEY_SIZE,
+           Nonce,
+           Buffer,
+           BufferCapacity,
+           EncodedLength
+           );
+}

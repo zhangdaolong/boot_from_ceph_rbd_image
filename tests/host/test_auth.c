@@ -435,6 +435,174 @@ TestDecodeAuthTicket (VOID)
             &OutSecretId, OutBlob, 4, &OutBlobLength) == EFI_BUFFER_TOO_SMALL);
 }
 
+static void
+TestServiceTicketCodecs (VOID)
+{
+  UINT8  PrincipalKey[CEPHX_AES_KEY_SIZE];
+  UINT8  ExpectedServiceKey[CEPHX_AES_KEY_SIZE];
+  UINT8  OpaqueBlob[32];
+  UINT8  ServiceTicketPayload[128];
+  UINTN  ServiceTicketPayloadLength;
+  UINT8  EncServiceTicket[256];
+  UINTN  EncServiceTicketLength;
+  UINT8  TicketBlobWire[128];
+  UINTN  TicketBlobWireLength;
+  UINT8  EncTicketBlob[256];
+  UINTN  EncTicketBlobLength;
+  UINT8  ResultBl[1024];
+  UINTN  ResultBlLength;
+  UINT8  OutKey[CEPHX_AES_KEY_SIZE];
+  UINT8  OutBlob[CEPHX_MAX_TICKET_BLOB];
+  UINTN  OutBlobLength;
+  UINT64 OutSecretId;
+  UINTN  Index;
+  UINTN  Offset;
+  UINT16 Value16;
+
+  for (Index = 0; Index < CEPHX_AES_KEY_SIZE; Index++) {
+    PrincipalKey[Index] = (UINT8)(0x30 + Index);
+    ExpectedServiceKey[Index] = (UINT8)(0xc0 + Index);
+  }
+  for (Index = 0; Index < sizeof (OpaqueBlob); Index++) {
+    OpaqueBlob[Index] = (UINT8)(0xa5 + Index);
+  }
+
+  // CephXServiceTicket carrying the OSD service session key.
+  Offset = 0;
+  ServiceTicketPayload[Offset++] = 1;
+  Value16 = CEPHX_CRYPTO_AES;
+  ServiceTicketPayload[Offset++] = (UINT8)Value16;
+  ServiceTicketPayload[Offset++] = (UINT8)(Value16 >> 8);
+  WriteLe32 (ServiceTicketPayload + Offset, 7); Offset += 4;
+  WriteLe32 (ServiceTicketPayload + Offset, 0); Offset += 4;
+  Value16 = CEPHX_AES_KEY_SIZE;
+  ServiceTicketPayload[Offset++] = (UINT8)Value16;
+  ServiceTicketPayload[Offset++] = (UINT8)(Value16 >> 8);
+  memcpy (ServiceTicketPayload + Offset, ExpectedServiceKey, CEPHX_AES_KEY_SIZE);
+  Offset += CEPHX_AES_KEY_SIZE;
+  WriteLe32 (ServiceTicketPayload + Offset, 7200); Offset += 4;
+  WriteLe32 (ServiceTicketPayload + Offset, 0); Offset += 4;
+  ServiceTicketPayloadLength = Offset;
+
+  assert (CephXEncryptAes128Payload (
+            PrincipalKey, CEPHX_AES_KEY_SIZE,
+            ServiceTicketPayload, ServiceTicketPayloadLength,
+            EncServiceTicket, sizeof (EncServiceTicket),
+            &EncServiceTicketLength) == EFI_SUCCESS);
+
+  // CephXTicketBlob wire form.
+  Offset = 0;
+  TicketBlobWire[Offset++] = 1;                                  // struct_v
+  WriteLe64 (TicketBlobWire + Offset, 0xfedcba9876543210ULL); Offset += 8;
+  WriteLe32 (TicketBlobWire + Offset, sizeof (OpaqueBlob)); Offset += 4;
+  memcpy (TicketBlobWire + Offset, OpaqueBlob, sizeof (OpaqueBlob));
+  Offset += sizeof (OpaqueBlob);
+  TicketBlobWireLength = Offset;
+
+  // should_encrypt_ticket = 1: ticket blob wrapped with encode_encrypt using
+  // the principal session key.
+  assert (CephXEncryptAes128Payload (
+            PrincipalKey, CEPHX_AES_KEY_SIZE,
+            TicketBlobWire, TicketBlobWireLength,
+            EncTicketBlob, sizeof (EncTicketBlob),
+            &EncTicketBlobLength) == EFI_SUCCESS);
+
+  // Assemble GET_PRINCIPAL_SESSION_KEY result_bl with one OSD ticket.
+  Offset = 0;
+  Value16 = CEPHX_GET_PRINCIPAL_SESSION_KEY;
+  ResultBl[Offset++] = (UINT8)Value16;
+  ResultBl[Offset++] = (UINT8)(Value16 >> 8);
+  WriteLe32 (ResultBl + Offset, 0); Offset += 4;
+  ResultBl[Offset++] = 1;                          // reply_v
+  WriteLe32 (ResultBl + Offset, 1); Offset += 4;   // num_tickets
+  WriteLe32 (ResultBl + Offset, CEPH_ENTITY_TYPE_OSD); Offset += 4;
+  ResultBl[Offset++] = 1;                          // ticket_v
+  memcpy (ResultBl + Offset, EncServiceTicket, EncServiceTicketLength);
+  Offset += EncServiceTicketLength;
+  ResultBl[Offset++] = 1;                          // should_encrypt_ticket
+  WriteLe32 (ResultBl + Offset, (UINT32)EncTicketBlobLength); Offset += 4;
+  memcpy (ResultBl + Offset, EncTicketBlob, EncTicketBlobLength);
+  Offset += EncTicketBlobLength;
+  ResultBlLength = Offset;
+
+  memset (OutKey, 0, sizeof (OutKey));
+  memset (OutBlob, 0, sizeof (OutBlob));
+  OutBlobLength = 0;
+  OutSecretId = 0;
+  assert (CephXDecodeServiceTicket (
+            ResultBl, ResultBlLength,
+            PrincipalKey, CEPHX_AES_KEY_SIZE,
+            CEPH_ENTITY_TYPE_OSD,
+            OutKey, sizeof (OutKey),
+            &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength) ==
+          EFI_SUCCESS);
+  assert (memcmp (OutKey, ExpectedServiceKey, CEPHX_AES_KEY_SIZE) == 0);
+  assert (OutSecretId == 0xfedcba9876543210ULL);
+  assert (OutBlobLength == sizeof (OpaqueBlob));
+  assert (memcmp (OutBlob, OpaqueBlob, sizeof (OpaqueBlob)) == 0);
+
+  // Wrong expected service id -> not found.
+  assert (CephXDecodeServiceTicket (
+            ResultBl, ResultBlLength,
+            PrincipalKey, CEPHX_AES_KEY_SIZE,
+            CEPH_ENTITY_TYPE_MON,
+            OutKey, sizeof (OutKey),
+            &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength) ==
+          EFI_NOT_FOUND);
+
+  // Wrong principal key is rejected.
+  {
+    UINT8 WrongKey[CEPHX_AES_KEY_SIZE];
+    memset (WrongKey, 0x11, sizeof (WrongKey));
+    assert (CephXDecodeServiceTicket (
+              ResultBl, ResultBlLength,
+              WrongKey, CEPHX_AES_KEY_SIZE,
+              CEPH_ENTITY_TYPE_OSD,
+              OutKey, sizeof (OutKey),
+              &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength) !=
+            EFI_SUCCESS);
+  }
+
+  // Build a service authorizer and verify its layout.
+  {
+    UINT8  Authorizer[512];
+    UINTN  AuthorizerLength;
+    CEPH_WIRE_CURSOR  Cursor;
+    UINT8  Version;
+    UINT64 GlobalId;
+    UINT32 ServiceId;
+    UINT64 SecretId;
+    UINT32 BlobLength;
+    UINT8  Blob[CEPHX_MAX_TICKET_BLOB];
+    UINT32 EncLength;
+
+    assert (CephXEncodeServiceAuthorizer (
+              0x1122334455667788ULL, CEPH_ENTITY_TYPE_OSD,
+              OutSecretId, OutBlob, OutBlobLength,
+              ExpectedServiceKey, CEPHX_AES_KEY_SIZE,
+              0x99ULL,
+              Authorizer, sizeof (Authorizer), &AuthorizerLength) ==
+            EFI_SUCCESS);
+    assert (CephWireInit (&Cursor, Authorizer, AuthorizerLength) == EFI_SUCCESS);
+    assert (CephWireReadU8 (&Cursor, &Version) == EFI_SUCCESS);
+    assert (Version == 1);
+    assert (CephWireReadLe64 (&Cursor, &GlobalId) == EFI_SUCCESS);
+    assert (GlobalId == 0x1122334455667788ULL);
+    assert (CephWireReadLe32 (&Cursor, &ServiceId) == EFI_SUCCESS);
+    assert (ServiceId == CEPH_ENTITY_TYPE_OSD);
+    assert (CephWireReadU8 (&Cursor, &Version) == EFI_SUCCESS);
+    assert (Version == 1);
+    assert (CephWireReadLe64 (&Cursor, &SecretId) == EFI_SUCCESS);
+    assert (SecretId == OutSecretId);
+    assert (CephWireReadLe32 (&Cursor, &BlobLength) == EFI_SUCCESS);
+    assert (BlobLength == OutBlobLength);
+    assert (CephWireReadBytes (&Cursor, Blob, BlobLength) == EFI_SUCCESS);
+    assert (memcmp (Blob, OutBlob, OutBlobLength) == 0);
+    assert (CephWireReadLe32 (&Cursor, &EncLength) == EFI_SUCCESS);
+    assert (EncLength == Cursor.Remaining);
+  }
+}
+
 VOID
 TestAuthCodecs (VOID)
 {
@@ -443,5 +611,6 @@ TestAuthCodecs (VOID)
   TestEncodeAuthenticateRequest ();
   TestDecodeAuthSessionKey ();
   TestDecodeAuthTicket ();
+  TestServiceTicketCodecs ();
   puts("auth codec tests: passed");
 }

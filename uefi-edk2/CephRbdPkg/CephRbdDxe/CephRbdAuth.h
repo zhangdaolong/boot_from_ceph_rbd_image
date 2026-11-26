@@ -111,4 +111,51 @@ CephRbdAuthHandshake (
   OUT CEPH_RBD_AUTH_SESSION       *Session
   );
 
+// The result of a GET_PRINCIPAL_SESSION_KEY exchange for one service. Ticket
+// is the service CephXTicketBlob (opaque, encrypted with the service secret),
+// SessionKey is the service session key recovered with the AUTH session key.
+typedef struct {
+  CEPH_RBD_TICKET  Ticket;
+  UINT8            SessionKey[CEPHX_AES_KEY_SIZE];
+  UINT64           GlobalId;
+  UINT32           ServiceId;
+  BOOLEAN          Valid;
+} CEPH_RBD_SERVICE_AUTH;
+
+// Encode the GET_PRINCIPAL_SESSION_KEY MAuth front payload. The auth_payload
+// is CephXRequestHeader(GET_PRINCIPAL_SESSION_KEY) + CephXAuthorizer(built
+// from the AUTH ticket) + CephXServiceTicketRequest(ServiceId mask).
+EFI_STATUS
+CephRbdAuthEncodeServiceTicketRequest (
+  IN  UINT64               GlobalId,
+  IN  CONST CEPH_RBD_TICKET  *AuthTicket,
+  IN  CONST UINT8          *SessionKey,
+  IN  UINT64               Nonce,
+  IN  UINT32               ServiceMask,
+  OUT VOID                 *Buffer,
+  IN  UINTN                BufferCapacity,
+  OUT UINTN                *EncodedLength
+  );
+
+// Run a GET_PRINCIPAL_SESSION_KEY exchange over the already-authenticated
+// monitor connection. ServiceAuth receives the service ticket and session
+// key for ServiceId (e.g. CEPH_ENTITY_TYPE_OSD).
+EFI_STATUS
+CephRbdAuthGetServiceTicket (
+  IN OUT CEPH_RBD_MSGR_V1_CLIENT        *Client,
+  IN  CONST CEPH_RBD_AUTH_SESSION       *Session,
+  IN  UINT32                            ServiceId,
+  OUT CEPH_RBD_SERVICE_AUTH             *ServiceAuth
+  );
+
+// Build a CephXAuthorizer for a service connection from a service auth.
+EFI_STATUS
+CephRbdAuthBuildServiceAuthorizer (
+  IN  CONST CEPH_RBD_SERVICE_AUTH  *ServiceAuth,
+  IN  UINT64                       Nonce,
+  OUT VOID                         *Buffer,
+  IN  UINTN                        BufferCapacity,
+  OUT UINTN                        *EncodedLength
+  );
+
 #endif

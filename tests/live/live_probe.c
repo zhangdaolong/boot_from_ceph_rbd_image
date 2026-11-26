@@ -61,6 +61,7 @@ main (
   CEPH_RBD_MSGR_V1_CLIENT          Client;
   CEPH_RBD_MSGR_V1_CONNECT_CONFIG  Config;
   CEPH_RBD_AUTH_SESSION            Session;
+  CEPH_RBD_SERVICE_AUTH            OsdAuth;
   CEPH_MON_REQUEST_HEADER          Header;
   UINT8                            Fsid[16];
   UINT8                            Secret[CEPHX_AES_KEY_SIZE];
@@ -118,7 +119,7 @@ main (
   Config.HostType = CEPH_MSGR_CONNECT_HOST_CLIENT;
   Config.ProtocolVersion = 15;  // CEPH_MONC_PROTOCOL
   Config.AuthorizerProtocol = 0;
-  Config.TimeoutSeconds = 5;
+  Config.TimeoutSeconds = 15;
 
   Status = CephRbdMsgrV1ClientConnect (&Config, &Client);
   printf ("connect: status=%d seq=%llu/%llu tag=%u action=%d\n",
@@ -154,6 +155,30 @@ main (
     if (EFI_ERROR (Status)) {
       CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
       return 1;
+    }
+
+    if (Session.AuthTicket.Valid) {
+      printf ("auth ticket: secret_id=%llu blob_len=%lu\n",
+              (unsigned long long)Session.AuthTicket.SecretId,
+              (unsigned long)Session.AuthTicket.BlobLength);
+    }
+
+    // Request the OSD service ticket from the monitor using the AUTH ticket
+    // as old_ticket. This is the credential needed to authenticate to OSDs.
+    Status = CephRbdAuthGetServiceTicket (
+               &Client, &Session, CEPH_ENTITY_TYPE_OSD, &OsdAuth
+               );
+    printf ("osd_service_ticket: status=%d valid=%d secret_id=%llu "
+            "blob_len=%lu\n",
+            Status, OsdAuth.Valid,
+            (unsigned long long)OsdAuth.Ticket.SecretId,
+            (unsigned long)OsdAuth.Ticket.BlobLength);
+    if (OsdAuth.Valid) {
+      printf ("osd session key:");
+      for (int KeyIndex = 0; KeyIndex < CEPHX_AES_KEY_SIZE; KeyIndex++) {
+        printf (" %02x", OsdAuth.SessionKey[KeyIndex]);
+      }
+      printf ("\n");
     }
   }
 
