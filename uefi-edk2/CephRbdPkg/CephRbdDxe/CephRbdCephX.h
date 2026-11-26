@@ -14,6 +14,10 @@
 #define CEPHX_CRYPTO_AES                    1
 #define CEPHX_CRYPTO_AES256_KRB5            2
 
+// CEPH_ENTITY_TYPE_AUTH from include/ceph_fs.h (same value as
+// CEPH_ENTITY_TYPE_AUTH_SERVICE in CephRbdAuth.h).
+#define CEPHX_ENTITY_TYPE_AUTH              0x20
+
 // CEPH_AUTH_UID_DEFAULT is ((__u64)-1); the monitor writes this constant when
 // encoding an AuthTicket regardless of the decoded auid.
 #define CEPHX_AUTH_UID_DEFAULT              MAX_UINT64
@@ -171,6 +175,20 @@ CephXDecryptAes128Payload (
   OUT VOID        *Payload,
   IN UINTN        PayloadCapacity,
   OUT UINTN       *PayloadLength
+  );
+
+// Extract the AUTH ticket session key from the final GET_AUTH_SESSION_KEY
+// reply's result_bl. The key is decrypted with the client's own secret; only
+// AES-128 keys are accepted. SessionKeyCapacity must be at least
+// CEPHX_AES_KEY_SIZE.
+EFI_STATUS
+CephXDecodeAuthSessionKey (
+  IN  CONST VOID   *Buffer,
+  IN  UINTN        BufferLength,
+  IN  CONST UINT8  *ClientSecret,
+  IN  UINTN        ClientSecretLength,
+  OUT UINT8        *SessionKey,
+  IN  UINTN        SessionKeyCapacity
   );
 
 // Decode the version-1 CephXTicketBlob wrapper. The returned Blob pointer

@@ -144,6 +144,13 @@ main (
             Status,
             (unsigned long long)Session.GlobalId,
             Session.HasSessionKey);
+    if (Session.HasSessionKey) {
+      printf ("auth session key:");
+      for (int KeyIndex = 0; KeyIndex < CEPHX_AES_KEY_SIZE; KeyIndex++) {
+        printf (" %02x", Session.SessionKey[KeyIndex]);
+      }
+      printf ("\n");
+    }
     if (EFI_ERROR (Status)) {
       CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
       return 1;

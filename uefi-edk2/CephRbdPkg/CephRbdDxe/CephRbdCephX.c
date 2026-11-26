@@ -808,6 +808,212 @@ CephXDecryptAes128Payload (
   return Status;
 }
 
+// Extract the AUTH ticket session key from the final GET_AUTH_SESSION_KEY
+// reply's result_bl. The buffer is:
+//   u16 request_type, s32 status                     (CephXResponseHeader)
+//   u8 service_ticket_reply_v (=1), u32 num_tickets
+//   repeated { u32 service_id, u8 ticket_v (=1),
+//              <encode_encrypt(CephXServiceTicket, client_secret)>,
+//              u8 should_encrypt_ticket, bufferlist service_ticket_bl }
+// The CephXServiceTicket inside the encrypted blob is:
+//   u8 struct_v (=1), CryptoKey session_key, utime_t validity.
+// The session key is encrypted with the client's own secret, so no service
+// secret is required to recover it. Only AES-128 keys are accepted.
+EFI_STATUS
+CephXDecodeAuthSessionKey (
+  IN  CONST VOID   *Buffer,
+  IN  UINTN        BufferLength,
+  IN  CONST UINT8  *ClientSecret,
+  IN  UINTN        ClientSecretLength,
+  OUT UINT8        *SessionKey,
+  IN  UINTN        SessionKeyCapacity
+  )
+{
+  CEPH_WIRE_CURSOR  Cursor;
+  EFI_STATUS        Status;
+  UINT8             Plaintext[CEPHX_MAX_ENCRYPTED_PAYLOAD];
+  UINTN             PlaintextLength;
+  UINT16            RequestType;
+  UINT32            StatusCode;
+  UINT8             ReplyVersion;
+  UINT32            TicketCount;
+  UINT32            ServiceId;
+  UINT8             TicketVersion;
+  UINT8             ShouldEncrypt;
+  UINT32            BlobLength;
+  UINT8             StructVersion;
+  UINT16            KeyType;
+  UINT32            CreatedSeconds;
+  UINT32            CreatedNanoseconds;
+  UINT16            KeyLength;
+  UINT32            ValiditySeconds;
+  UINT32            ValidityNanoseconds;
+  UINT32            Index;
+  BOOLEAN           Found;
+
+  if ((Buffer == NULL) || (ClientSecret == NULL) || (SessionKey == NULL) ||
+      (SessionKeyCapacity < CEPHX_AES_KEY_SIZE))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (ClientSecretLength != CEPHX_AES_KEY_SIZE) {
+    return EFI_UNSUPPORTED;
+  }
+
+  Status = CephWireInit (&Cursor, Buffer, BufferLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  // CephXResponseHeader.
+  Status = CephWireReadLe16 (&Cursor, &RequestType);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &StatusCode);
+  }
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  if (StatusCode != 0) {
+    return EFI_ACCESS_DENIED;
+  }
+
+  // Service ticket reply header.
+  Status = CephWireReadU8 (&Cursor, &ReplyVersion);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &TicketCount);
+  }
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  if ((ReplyVersion != 1) || (TicketCount == 0) || (TicketCount > 16)) {
+    return EFI_UNSUPPORTED;
+  }
+
+  Found = FALSE;
+  for (Index = 0; Index < TicketCount; Index++) {
+    // service_id, then ticket struct version.
+    Status = CephWireReadLe32 (&Cursor, &ServiceId);
+    if (!EFI_ERROR (Status)) {
+      Status = CephWireReadU8 (&Cursor, &TicketVersion);
+    }
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+    if (TicketVersion != 1) {
+      return EFI_UNSUPPORTED;
+    }
+
+    // encode_encrypt(CephXServiceTicket, client_secret): bufferlist prefix
+    // followed by ciphertext. CephXDecryptAes128Payload validates the
+    // struct_v/magic wrapper and returns the inner CephXServiceTicket.
+    Status = CephXDecryptAes128Payload (
+               ClientSecret,
+               ClientSecretLength,
+               Cursor.Data,
+               Cursor.Remaining,
+               Plaintext,
+               sizeof (Plaintext),
+               &PlaintextLength
+               );
+    if (EFI_ERROR (Status)) {
+      ZeroMem (Plaintext, sizeof (Plaintext));
+      return Status;
+    }
+
+    // Advance the outer cursor past the encrypted bufferlist. The decrypted
+    // ciphertext length equals the encoded length minus its u32 prefix; we
+    // recover the consumed bytes from the decrypt helper's input cursor.
+    {
+      CEPH_WIRE_CURSOR  EncCursor;
+      UINT32            EncLength;
+
+      Status = CephWireInit (&EncCursor, Cursor.Data, Cursor.Remaining);
+      if (!EFI_ERROR (Status)) {
+        Status = CephWireReadLe32 (&EncCursor, &EncLength);
+      }
+      if (EFI_ERROR (Status) || (EncLength > EncCursor.Remaining)) {
+        ZeroMem (Plaintext, sizeof (Plaintext));
+        return EFI_BAD_BUFFER_SIZE;
+      }
+      Status = CephWireSkip (&Cursor, sizeof (UINT32) + EncLength);
+    }
+    if (EFI_ERROR (Status)) {
+      ZeroMem (Plaintext, sizeof (Plaintext));
+      return Status;
+    }
+
+    // Parse the inner CephXServiceTicket only for the AUTH ticket; the
+    // session key there is what authenticates subsequent monitor RPCs.
+    if (ServiceId == CEPHX_ENTITY_TYPE_AUTH) {
+      {
+        CEPH_WIRE_CURSOR  TicketCursor;
+
+        Status = CephWireInit (&TicketCursor, Plaintext, PlaintextLength);
+        if (!EFI_ERROR (Status)) {
+          Status = CephWireReadU8 (&TicketCursor, &StructVersion);
+        }
+        if (!EFI_ERROR (Status) && (StructVersion != 1)) {
+          Status = EFI_UNSUPPORTED;
+        }
+
+        // CryptoKey session_key: u16 type, utime_t created, u16 len, bytes.
+        if (!EFI_ERROR (Status)) {
+          Status = CephWireReadLe16 (&TicketCursor, &KeyType);
+        }
+        if (!EFI_ERROR (Status)) {
+          Status = CephWireReadLe32 (&TicketCursor, &CreatedSeconds);
+        }
+        if (!EFI_ERROR (Status)) {
+          Status = CephWireReadLe32 (&TicketCursor, &CreatedNanoseconds);
+        }
+        if (!EFI_ERROR (Status)) {
+          Status = CephWireReadLe16 (&TicketCursor, &KeyLength);
+        }
+        if (!EFI_ERROR (Status) && (KeyLength != CEPHX_AES_KEY_SIZE)) {
+          Status = EFI_UNSUPPORTED;
+        }
+        if (!EFI_ERROR (Status)) {
+          Status = CephWireReadBytes (&TicketCursor, SessionKey, KeyLength);
+        }
+        // utime_t validity: u32 sec, u32 nsec. Present but not needed.
+        if (!EFI_ERROR (Status)) {
+          Status = CephWireReadLe32 (&TicketCursor, &ValiditySeconds);
+        }
+        if (!EFI_ERROR (Status)) {
+          Status = CephWireReadLe32 (&TicketCursor, &ValidityNanoseconds);
+        }
+        (VOID)CreatedSeconds;
+        (VOID)CreatedNanoseconds;
+        (VOID)ValiditySeconds;
+        (VOID)ValidityNanoseconds;
+        (VOID)KeyType;
+      }
+      ZeroMem (Plaintext, sizeof (Plaintext));
+      if (EFI_ERROR (Status)) {
+        return Status;
+      }
+      Found = TRUE;
+    }
+
+    // should_encrypt_ticket + service_ticket_bl (bufferlist). Skip both.
+    Status = CephWireReadU8 (&Cursor, &ShouldEncrypt);
+    if (!EFI_ERROR (Status)) {
+      Status = CephWireReadLe32 (&Cursor, &BlobLength);
+    }
+    if (EFI_ERROR (Status) || (BlobLength > Cursor.Remaining)) {
+      return EFI_BAD_BUFFER_SIZE;
+    }
+    Status = CephWireSkip (&Cursor, BlobLength);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+  }
+
+  ZeroMem (Plaintext, sizeof (Plaintext));
+  return Found ? EFI_SUCCESS : EFI_NOT_FOUND;
+}
+
 EFI_STATUS
 CephXDecodeTicketBlob (
   IN CONST VOID         *Buffer,
