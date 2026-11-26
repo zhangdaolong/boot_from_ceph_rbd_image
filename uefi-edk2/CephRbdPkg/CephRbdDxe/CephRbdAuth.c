@@ -460,19 +460,25 @@ CephRbdAuthHandshake (
   Session->ClientChallenge = ClientChallenge;
 
   // The AUTH ticket session key is carried in the reply's result_bl after
-  // the CephXResponseHeader, encrypted with our own secret. Messenger v1
-  // does not sign messages, so a failure to parse it does not invalidate the
-  // authenticated session; it is retained for a future OSD service-ticket
-  // exchange.
+  // the CephXResponseHeader, encrypted with our own secret. The same reply
+  // carries an AUTH CephXTicketBlob that must be presented as old_ticket when
+  // requesting OSD/MON service tickets. Messenger v1 does not sign messages,
+  // so a failure to parse either does not invalidate the authenticated
+  // session; both are retained for subsequent service-ticket exchanges.
   Status = CephXDecodeAuthSessionKey (
              AuthReply.ResultBl,
              AuthReply.ResultBlLength,
              Secret,
              SecretLength,
              Session->SessionKey,
-             sizeof (Session->SessionKey)
+             sizeof (Session->SessionKey),
+             &Session->AuthTicket.SecretId,
+             Session->AuthTicket.Blob,
+             sizeof (Session->AuthTicket.Blob),
+             &Session->AuthTicket.BlobLength
              );
   Session->HasSessionKey = !EFI_ERROR (Status);
+  Session->AuthTicket.Valid = !EFI_ERROR (Status);
 
   return EFI_SUCCESS;
 }

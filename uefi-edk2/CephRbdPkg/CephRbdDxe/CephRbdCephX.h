@@ -8,6 +8,7 @@
 #define CEPHX_REQUEST_GET_ROTATING_KEY      0x0400
 #define CEPHX_AES_KEY_SIZE                  16
 #define CEPHX_MAX_ENCRYPTED_PAYLOAD         4096
+#define CEPHX_MAX_TICKET_BLOB               2048
 
 // Ceph crypto key types (include/linux/ceph/ceph_fs.h).
 #define CEPHX_CRYPTO_NONE                   0
@@ -181,6 +182,13 @@ CephXDecryptAes128Payload (
 // reply's result_bl. The key is decrypted with the client's own secret; only
 // AES-128 keys are accepted. SessionKeyCapacity must be at least
 // CEPHX_AES_KEY_SIZE.
+//
+// The same reply also carries a CephXTicketBlob for the AUTH service. When
+// TicketBlob and TicketBlobLength are non-NULL, the blob's secret_id and raw
+// ciphertext are copied out (TicketBlobCapacity bounds the copy) so the
+// client can present it as old_ticket in a GET_PRINCIPAL_SESSION_KEY request.
+// TicketSecretId is optional. The blob is opaque to the client: it is
+// encrypted with the AUTH service secret held only by the monitor.
 EFI_STATUS
 CephXDecodeAuthSessionKey (
   IN  CONST VOID   *Buffer,
@@ -188,7 +196,11 @@ CephXDecodeAuthSessionKey (
   IN  CONST UINT8  *ClientSecret,
   IN  UINTN        ClientSecretLength,
   OUT UINT8        *SessionKey,
-  IN  UINTN        SessionKeyCapacity
+  IN  UINTN        SessionKeyCapacity,
+  OUT UINT64       *TicketSecretId,  OPTIONAL
+  OUT VOID         *TicketBlob,  OPTIONAL
+  IN  UINTN        TicketBlobCapacity,
+  OUT UINTN        *TicketBlobLength  OPTIONAL
   );
 
 // Decode the version-1 CephXTicketBlob wrapper. The returned Blob pointer

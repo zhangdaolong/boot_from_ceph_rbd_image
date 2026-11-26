@@ -32,6 +32,16 @@
 #define CEPH_RBD_AUTH_MAX_REPLY      2048
 #define CEPH_RBD_AUTH_MAX_PAYLOAD    1024
 
+// A CephXTicketBlob retained from the monitor handshake. Blob bytes are a
+// copy of the encrypted CephXServiceTicketInfo; SecretId selects the service
+// secret used to decrypt it on the service side.
+typedef struct {
+  UINT64  SecretId;
+  UINT8   Blob[CEPHX_MAX_TICKET_BLOB];
+  UINTN   BlobLength;
+  BOOLEAN Valid;
+} CEPH_RBD_TICKET;
+
 // The complete result of a successful monitor CephX handshake.
 typedef struct {
   UINT64  GlobalId;        // Assigned global id from MAuthReply.
@@ -39,6 +49,7 @@ typedef struct {
   UINT64  ClientChallenge; // Our nonce.
   UINT8   SessionKey[CEPHX_AES_KEY_SIZE]; // AUTH ticket session key (AES-128).
   BOOLEAN HasSessionKey;
+  CEPH_RBD_TICKET  AuthTicket;  // AUTH ticket for building service authorizers.
 } CEPH_RBD_AUTH_SESSION;
 
 // Encode the first MAuth message front payload. protocol=CEPH_AUTH_UNKNOWN,

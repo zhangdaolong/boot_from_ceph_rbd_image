@@ -826,7 +826,11 @@ CephXDecodeAuthSessionKey (
   IN  CONST UINT8  *ClientSecret,
   IN  UINTN        ClientSecretLength,
   OUT UINT8        *SessionKey,
-  IN  UINTN        SessionKeyCapacity
+  IN  UINTN        SessionKeyCapacity,
+  OUT UINT64       *TicketSecretId,  OPTIONAL
+  OUT VOID         *TicketBlob,  OPTIONAL
+  IN  UINTN        TicketBlobCapacity,
+  OUT UINTN        *TicketBlobLength  OPTIONAL
   )
 {
   CEPH_WIRE_CURSOR  Cursor;
@@ -850,6 +854,7 @@ CephXDecodeAuthSessionKey (
   UINT32            ValidityNanoseconds;
   UINT32            Index;
   BOOLEAN           Found;
+  UINT8             EncodedTicketBuf[CEPHX_MAX_TICKET_BLOB];
 
   if ((Buffer == NULL) || (ClientSecret == NULL) || (SessionKey == NULL) ||
       (SessionKeyCapacity < CEPHX_AES_KEY_SIZE))
@@ -996,7 +1001,7 @@ CephXDecodeAuthSessionKey (
       Found = TRUE;
     }
 
-    // should_encrypt_ticket + service_ticket_bl (bufferlist). Skip both.
+    // should_encrypt_ticket + service_ticket_bl (bufferlist).
     Status = CephWireReadU8 (&Cursor, &ShouldEncrypt);
     if (!EFI_ERROR (Status)) {
       Status = CephWireReadLe32 (&Cursor, &BlobLength);
@@ -1004,6 +1009,72 @@ CephXDecodeAuthSessionKey (
     if (EFI_ERROR (Status) || (BlobLength > Cursor.Remaining)) {
       return EFI_BAD_BUFFER_SIZE;
     }
+
+    // For the AUTH ticket, retain the CephXTicketBlob so a later
+    // GET_PRINCIPAL_SESSION_KEY request can present it as old_ticket. The
+    // blob bytes stay opaque: they are encrypted with the AUTH service
+    // secret that only the monitor knows. All we need is secret_id and the
+    // raw ciphertext.
+    if ((ServiceId == CEPHX_ENTITY_TYPE_AUTH) && Found &&
+        (TicketBlob != NULL) && (TicketBlobLength != NULL))
+    {
+      CEPHX_TICKET_BLOB  Ticket;
+      CONST UINT8        *EncodedTicket;
+      UINTN              EncodedTicketLength;
+
+      if (ShouldEncrypt == 0) {
+        // Fresh global_id: service_ticket_bl is a plain encoded CephXTicketBlob.
+        EncodedTicket = Cursor.Data;
+        EncodedTicketLength = BlobLength;
+      } else {
+        // Reclaimed global_id: the blob was encrypted with the AUTH session
+        // key we just recovered. Decrypt it before decoding the wrapper.
+        UINT8  TicketPlain[CEPHX_MAX_TICKET_BLOB];
+        UINTN  TicketPlainLength;
+
+        Status = CephXDecryptAes128Payload (
+                   SessionKey,
+                   CEPHX_AES_KEY_SIZE,
+                   Cursor.Data,
+                   BlobLength,
+                   TicketPlain,
+                   sizeof (TicketPlain),
+                   &TicketPlainLength
+                   );
+        if (EFI_ERROR (Status)) {
+          ZeroMem (TicketPlain, sizeof (TicketPlain));
+          ZeroMem (Plaintext, sizeof (Plaintext));
+          return Status;
+        }
+
+        CopyMem (EncodedTicketBuf, TicketPlain, TicketPlainLength);
+        EncodedTicket = EncodedTicketBuf;
+        EncodedTicketLength = TicketPlainLength;
+        ZeroMem (TicketPlain, sizeof (TicketPlain));
+      }
+
+      Status = CephXDecodeTicketBlob (
+                 EncodedTicket,
+                 EncodedTicketLength,
+                 &Ticket
+                 );
+      if (EFI_ERROR (Status)) {
+        ZeroMem (Plaintext, sizeof (Plaintext));
+        return Status;
+      }
+
+      if (TicketBlobCapacity < Ticket.BlobLength) {
+        ZeroMem (Plaintext, sizeof (Plaintext));
+        return EFI_BUFFER_TOO_SMALL;
+      }
+
+      if (TicketSecretId != NULL) {
+        *TicketSecretId = Ticket.SecretId;
+      }
+      CopyMem (TicketBlob, Ticket.Blob, Ticket.BlobLength);
+      *TicketBlobLength = Ticket.BlobLength;
+    }
+
     Status = CephWireSkip (&Cursor, BlobLength);
     if (EFI_ERROR (Status)) {
       return Status;

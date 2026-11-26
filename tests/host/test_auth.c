@@ -298,7 +298,8 @@ TestDecodeAuthSessionKey (VOID)
   assert (CephXDecodeAuthSessionKey (
             ResultBl, ResultBlLength,
             ClientSecret, CEPHX_AES_KEY_SIZE,
-            OutKey, sizeof (OutKey)) == EFI_SUCCESS);
+            OutKey, sizeof (OutKey),
+            NULL, NULL, 0, NULL) == EFI_SUCCESS);
   assert (memcmp (OutKey, ExpectedKey, CEPHX_AES_KEY_SIZE) == 0);
 
   // Wrong secret, tampered ciphertext, truncated buffer and bad args are
@@ -308,22 +309,130 @@ TestDecodeAuthSessionKey (VOID)
     memset (WrongSecret, 0x77, sizeof (WrongSecret));
     assert (CephXDecodeAuthSessionKey (
               ResultBl, ResultBlLength, WrongSecret, CEPHX_AES_KEY_SIZE,
-              OutKey, sizeof (OutKey)) != EFI_SUCCESS);
+              OutKey, sizeof (OutKey), NULL, NULL, 0, NULL) != EFI_SUCCESS);
   }
   ResultBl[Offset / 2] ^= 0x01;
   assert (CephXDecodeAuthSessionKey (
             ResultBl, ResultBlLength, ClientSecret, CEPHX_AES_KEY_SIZE,
-            OutKey, sizeof (OutKey)) != EFI_SUCCESS);
+            OutKey, sizeof (OutKey), NULL, NULL, 0, NULL) != EFI_SUCCESS);
   assert (CephXDecodeAuthSessionKey (
             ResultBl, ResultBlLength / 2, ClientSecret, CEPHX_AES_KEY_SIZE,
-            OutKey, sizeof (OutKey)) != EFI_SUCCESS);
+            OutKey, sizeof (OutKey), NULL, NULL, 0, NULL) != EFI_SUCCESS);
   assert (CephXDecodeAuthSessionKey (
             NULL, ResultBlLength, ClientSecret, CEPHX_AES_KEY_SIZE,
-            OutKey, sizeof (OutKey)) == EFI_INVALID_PARAMETER);
+            OutKey, sizeof (OutKey), NULL, NULL, 0, NULL) == EFI_INVALID_PARAMETER);
   assert (CephXDecodeAuthSessionKey (
             ResultBl, ResultBlLength, ClientSecret, CEPHX_AES_KEY_SIZE,
-            OutKey, 8) == EFI_INVALID_PARAMETER);
+            OutKey, 8, NULL, NULL, 0, NULL) == EFI_INVALID_PARAMETER);
 
+}
+
+static void
+TestDecodeAuthTicket (VOID)
+{
+  UINT8  ClientSecret[CEPHX_AES_KEY_SIZE];
+  UINT8  ExpectedKey[CEPHX_AES_KEY_SIZE];
+  UINT8  TicketPayload[128];
+  UINTN  TicketPayloadLength;
+  UINT8  Encrypted[256];
+  UINTN  EncryptedLength;
+  UINT8  ResultBl[1024];
+  UINTN  ResultBlLength;
+  UINT8  OutKey[CEPHX_AES_KEY_SIZE];
+  UINT8  OutBlob[CEPHX_MAX_TICKET_BLOB];
+  UINTN  OutBlobLength;
+  UINT64 OutSecretId;
+  UINT8  InnerBlob[24];
+  UINTN  Offset;
+  UINTN  Index;
+  UINT16 Value16;
+
+  for (Index = 0; Index < CEPHX_AES_KEY_SIZE; Index++) {
+    ClientSecret[Index] = (UINT8)(0x20 + Index);
+    ExpectedKey[Index] = (UINT8)(0xb0 + Index);
+  }
+  for (Index = 0; Index < sizeof (InnerBlob); Index++) {
+    InnerBlob[Index] = (UINT8)(0x5a + Index);
+  }
+
+  // Encrypted CephXServiceTicket carrying the session key.
+  Offset = 0;
+  TicketPayload[Offset++] = 1;                 // CephXServiceTicket struct_v
+  Value16 = CEPHX_CRYPTO_AES;
+  TicketPayload[Offset++] = (UINT8)Value16;
+  TicketPayload[Offset++] = (UINT8)(Value16 >> 8);
+  WriteLe32 (TicketPayload + Offset, 1); Offset += 4;
+  WriteLe32 (TicketPayload + Offset, 0); Offset += 4;
+  Value16 = CEPHX_AES_KEY_SIZE;
+  TicketPayload[Offset++] = (UINT8)Value16;
+  TicketPayload[Offset++] = (UINT8)(Value16 >> 8);
+  memcpy (TicketPayload + Offset, ExpectedKey, CEPHX_AES_KEY_SIZE);
+  Offset += CEPHX_AES_KEY_SIZE;
+  WriteLe32 (TicketPayload + Offset, 3600); Offset += 4;
+  WriteLe32 (TicketPayload + Offset, 0); Offset += 4;
+  TicketPayloadLength = Offset;
+
+  assert (CephXEncryptAes128Payload (
+            ClientSecret, CEPHX_AES_KEY_SIZE,
+            TicketPayload, TicketPayloadLength,
+            Encrypted, sizeof (Encrypted), &EncryptedLength) == EFI_SUCCESS);
+
+  // result_bl with one AUTH ticket and a plain CephXTicketBlob.
+  Offset = 0;
+  Value16 = CEPHX_GET_AUTH_SESSION_KEY;
+  ResultBl[Offset++] = (UINT8)Value16;
+  ResultBl[Offset++] = (UINT8)(Value16 >> 8);
+  WriteLe32 (ResultBl + Offset, 0); Offset += 4;   // status
+  ResultBl[Offset++] = 1;                          // service_ticket_reply_v
+  WriteLe32 (ResultBl + Offset, 1); Offset += 4;   // num tickets
+  WriteLe32 (ResultBl + Offset, CEPHX_ENTITY_TYPE_AUTH); Offset += 4;
+  ResultBl[Offset++] = 1;                          // ticket struct_v
+  memcpy (ResultBl + Offset, Encrypted, EncryptedLength);
+  Offset += EncryptedLength;
+  ResultBl[Offset++] = 0;                          // should_encrypt_ticket
+
+  // service_ticket_bl bufferlist: CephXTicketBlob = {u8 v, u64 secret_id,
+  // bufferlist blob}. Build it into a temporary then wrap with a u32 prefix.
+  {
+    UINT8  TicketBlob[256];
+    UINTN  BlobOffset = 0;
+
+    TicketBlob[BlobOffset++] = 1;                          // struct_v
+    WriteLe64 (TicketBlob + BlobOffset, 0x123456789abcdef0ULL);
+    BlobOffset += 8;
+    WriteLe32 (TicketBlob + BlobOffset, sizeof (InnerBlob));
+    BlobOffset += 4;
+    memcpy (TicketBlob + BlobOffset, InnerBlob, sizeof (InnerBlob));
+    BlobOffset += sizeof (InnerBlob);
+
+    WriteLe32 (ResultBl + Offset, (UINT32)BlobOffset); Offset += 4;
+    memcpy (ResultBl + Offset, TicketBlob, BlobOffset);
+    Offset += BlobOffset;
+  }
+  ResultBlLength = Offset;
+
+  memset (OutKey, 0, sizeof (OutKey));
+  memset (OutBlob, 0, sizeof (OutBlob));
+  OutBlobLength = 0;
+  OutSecretId = 0;
+  assert (CephXDecodeAuthSessionKey (
+            ResultBl, ResultBlLength,
+            ClientSecret, CEPHX_AES_KEY_SIZE,
+            OutKey, sizeof (OutKey),
+            &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength) ==
+          EFI_SUCCESS);
+  assert (memcmp (OutKey, ExpectedKey, CEPHX_AES_KEY_SIZE) == 0);
+  assert (OutSecretId == 0x123456789abcdef0ULL);
+  assert (OutBlobLength == sizeof (InnerBlob));
+  assert (memcmp (OutBlob, InnerBlob, sizeof (InnerBlob)) == 0);
+
+  // Too-small ticket blob capacity is rejected.
+  OutBlobLength = 0;
+  assert (CephXDecodeAuthSessionKey (
+            ResultBl, ResultBlLength,
+            ClientSecret, CEPHX_AES_KEY_SIZE,
+            OutKey, sizeof (OutKey),
+            &OutSecretId, OutBlob, 4, &OutBlobLength) == EFI_BUFFER_TOO_SMALL);
 }
 
 VOID
@@ -333,5 +442,6 @@ TestAuthCodecs (VOID)
   TestDecodeReply ();
   TestEncodeAuthenticateRequest ();
   TestDecodeAuthSessionKey ();
+  TestDecodeAuthTicket ();
   puts("auth codec tests: passed");
 }
