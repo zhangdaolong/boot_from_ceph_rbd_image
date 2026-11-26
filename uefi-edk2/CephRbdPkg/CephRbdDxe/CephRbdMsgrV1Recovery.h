@@ -113,6 +113,16 @@ CephMsgrV1RetransmitQueueExhausted (
   IN UINT64                               MinimumSequence
   );
 
+// Complete the connect-time SEQ exchange after a CEPH_MSGR_TAG_SEQ reply.
+// Reads the peer's newly-acked sequence, replays queued frames and writes our
+// in_seq, leaving the session live. Also used by the OSD service connect path,
+// which performs its own CephX challenge round-trip before reaching here.
+EFI_STATUS
+CephRbdMsgrV1FinishSeqRecovery (
+  IN CONST CEPH_RBD_MSGR_V1_CONNECT_CONFIG  *Config,
+  IN OUT CEPH_RBD_MSGR_V1_CLIENT            *Client
+  );
+
 // Connect with bounded retry. Handles RETRY_SESSION, RETRY_GLOBAL, WAIT,
 // RESETSESSION, CHALLENGE_AUTH and SEQ recovery actions using the negotiated
 // connect reply. On success the client owns a live TCP connection and session.

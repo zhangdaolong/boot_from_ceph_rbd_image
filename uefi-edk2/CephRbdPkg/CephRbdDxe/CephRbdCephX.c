@@ -558,6 +558,63 @@ CephXEncodeAuthenticate (
 }
 
 EFI_STATUS
+CephXEncryptAes128RawPayload (
+  IN CONST UINT8  *Key,
+  IN UINTN        KeyLength,
+  IN CONST VOID   *Payload,
+  IN UINTN        PayloadLength,
+  OUT VOID        *Buffer,
+  IN UINTN        BufferLength,
+  OUT UINTN       *EncodedLength
+  )
+{
+  EFI_STATUS        Status;
+  UINT8             Plaintext[CEPHX_MAX_ENCRYPTED_PAYLOAD];
+  UINTN             PlaintextLength;
+  UINTN             Index;
+
+  if ((Key == NULL) || ((Payload == NULL) && (PayloadLength != 0)) ||
+      (Buffer == NULL) || (EncodedLength == NULL))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (KeyLength != CEPHX_AES_KEY_SIZE) {
+    return EFI_UNSUPPORTED;
+  }
+
+  if (PayloadLength > CEPHX_MAX_ENCRYPTED_PAYLOAD - 9) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *EncodedLength = 0;
+  PlaintextLength = 9 + PayloadLength;
+  Plaintext[0] = 1;
+  for (Index = 0; Index < 8; Index++) {
+    Plaintext[1 + Index] = (UINT8)(CEPHX_AUTH_ENC_MAGIC >> (8 * Index));
+  }
+  if (PayloadLength != 0) {
+    CopyMem (Plaintext + 9, Payload, PayloadLength);
+  }
+
+  if (BufferLength < PlaintextLength + 16) {
+    ZeroMem (Plaintext, sizeof (Plaintext));
+    return EFI_BUFFER_TOO_SMALL;
+  }
+
+  Status = CephXAes128CbcEncrypt (
+             Key,
+             Plaintext,
+             PlaintextLength,
+             Buffer,
+             BufferLength,
+             EncodedLength
+             );
+  ZeroMem (Plaintext, sizeof (Plaintext));
+  return Status;
+}
+
+EFI_STATUS
 CephXEncryptAes128Payload (
   IN CONST UINT8  *Key,
   IN UINTN        KeyLength,
@@ -715,27 +772,24 @@ CephXComputeAesChallengeResponse (
 }
 
 EFI_STATUS
-CephXDecryptAes128Payload (
+CephXDecryptAes128RawPayload (
   IN CONST UINT8  *Key,
   IN UINTN        KeyLength,
-  IN CONST VOID   *Buffer,
-  IN UINTN        BufferLength,
+  IN CONST VOID   *Ciphertext,
+  IN UINTN        CiphertextLength,
   OUT VOID        *Payload,
   IN UINTN        PayloadCapacity,
   OUT UINTN       *PayloadLength
   )
 {
-  CEPH_WIRE_CURSOR  Cursor;
   CEPH_WIRE_CURSOR  Plain;
   EFI_STATUS        Status;
-  CONST UINT8      *Ciphertext;
-  UINT32            CiphertextLength;
   UINT8             Plaintext[CEPHX_MAX_ENCRYPTED_PAYLOAD];
   UINTN             PlaintextLength;
   UINT8             StructVersion;
   UINT64            Magic;
 
-  if ((Key == NULL) || (Buffer == NULL) || (Payload == NULL) ||
+  if ((Key == NULL) || (Ciphertext == NULL) || (Payload == NULL) ||
       (PayloadLength == NULL))
   {
     return EFI_INVALID_PARAMETER;
@@ -746,25 +800,13 @@ CephXDecryptAes128Payload (
   }
 
   *PayloadLength = 0;
-  Status = CephWireInit (&Cursor, Buffer, BufferLength);
-  if (EFI_ERROR (Status)) {
-    return Status;
-  }
-
-  Status = CephWireReadLe32 (&Cursor, &CiphertextLength);
-  if (EFI_ERROR (Status)) {
-    return Status;
-  }
-
   if ((CiphertextLength == 0) ||
-      (CiphertextLength > Cursor.Remaining) ||
-      ((CiphertextLength & 15) != 0) ||
-      (CiphertextLength > sizeof (Plaintext)))
+      (CiphertextLength > sizeof (Plaintext)) ||
+      ((CiphertextLength & 15) != 0))
   {
     return EFI_BAD_BUFFER_SIZE;
   }
 
-  Ciphertext = Cursor.Data;
   Status = CephXAes128CbcDecrypt (
              Key,
              Ciphertext,
@@ -806,6 +848,58 @@ CephXDecryptAes128Payload (
 
   ZeroMem (Plaintext, sizeof (Plaintext));
   return Status;
+}
+
+EFI_STATUS
+CephXDecryptAes128Payload (
+  IN CONST UINT8  *Key,
+  IN UINTN        KeyLength,
+  IN CONST VOID   *Buffer,
+  IN UINTN        BufferLength,
+  OUT VOID        *Payload,
+  IN UINTN        PayloadCapacity,
+  OUT UINTN       *PayloadLength
+  )
+{
+  CEPH_WIRE_CURSOR  Cursor;
+  EFI_STATUS        Status;
+  UINT32            CiphertextLength;
+
+  if ((Key == NULL) || (Buffer == NULL) || (Payload == NULL) ||
+      (PayloadLength == NULL))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (KeyLength != CEPHX_AES_KEY_SIZE) {
+    return EFI_UNSUPPORTED;
+  }
+
+  Status = CephWireInit (&Cursor, Buffer, BufferLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  // Ceph's encode_encrypt() wraps the raw ciphertext in a bufferlist, i.e.
+  // a little-endian u32 length followed by the ciphertext bytes.
+  Status = CephWireReadLe32 (&Cursor, &CiphertextLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if (CiphertextLength > Cursor.Remaining) {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+
+  return CephXDecryptAes128RawPayload (
+           Key,
+           KeyLength,
+           Cursor.Data,
+           CiphertextLength,
+           Payload,
+           PayloadCapacity,
+           PayloadLength
+           );
 }
 
 // Extract the AUTH ticket session key from the final GET_AUTH_SESSION_KEY
@@ -1482,7 +1576,10 @@ CephXDecodeAuthorizeChallengeSecret (
     return EFI_UNSUPPORTED;
   }
 
-  Status = CephXDecryptAes128Payload (
+  // The OSD sends CHALLENGE_AUTHORIZER via encode_encrypt_enc_bl(), i.e. raw
+  // ciphertext with no bufferlist length prefix (ProtocolV1 appends the
+  // authorizer_reply bytes verbatim after ceph_msg_connect_reply).
+  Status = CephXDecryptAes128RawPayload (
              SessionKey,
              SessionKeyLength,
              Buffer,
@@ -1759,6 +1856,8 @@ CephXEncodeServiceAuthorizer (
   IN  CONST UINT8   *SessionKey,
   IN  UINTN         SessionKeyLength,
   IN  UINT64        Nonce,
+  IN  BOOLEAN       HaveChallenge,
+  IN  UINT64        ServerChallengePlusOne,
   OUT VOID          *Buffer,
   IN  UINTN         BufferCapacity,
   OUT UINTN         *EncodedLength
@@ -1785,8 +1884,8 @@ CephXEncodeServiceAuthorizer (
 
   *EncodedLength = 0;
 
-  // CephXAuthorize v2: u8 struct_v=2, u64 nonce, u8 have_challenge=0,
-  // u64 server_challenge_plus_one=0.
+  // CephXAuthorize v2: u8 struct_v=2, u64 nonce, u8 have_challenge,
+  // u64 server_challenge_plus_one.
   Status = CephWireWriterInit (&Writer, Authorize, sizeof (Authorize));
   if (EFI_ERROR (Status)) {
     return Status;
@@ -1796,10 +1895,13 @@ CephXEncodeServiceAuthorizer (
     Status = CephWireWriteLe64 (&Writer, Nonce);
   }
   if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteU8 (&Writer, 0);
+    Status = CephWireWriteU8 (&Writer, HaveChallenge ? 1 : 0);
   }
   if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe64 (&Writer, 0);
+    Status = CephWireWriteLe64 (
+               &Writer,
+               HaveChallenge ? ServerChallengePlusOne : 0
+               );
   }
   if (EFI_ERROR (Status)) {
     return Status;

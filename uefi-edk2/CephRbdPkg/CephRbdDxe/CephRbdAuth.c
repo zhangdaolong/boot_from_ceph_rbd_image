@@ -3,6 +3,9 @@
 #include "CephRbdAuth.h"
 #include "CephRbdRpc.h"
 #include "CephRbdWire.h"
+#include "CephRbdTcp4.h"
+#include "CephRbdMsgrV1Handshake.h"
+#include "CephRbdMsgrV1Session.h"
 
 // Encode a Ceph bufferlist length prefix: u32 byte count followed by raw bytes.
 // Ceph's encode(bufferlist) uses exactly this layout.
@@ -524,6 +527,8 @@ CephRbdAuthEncodeServiceTicketRequest (
              SessionKey,
              CEPHX_AES_KEY_SIZE,
              Nonce,
+             FALSE,
+             0,
              Authorizer,
              sizeof (Authorizer),
              &AuthorizerLength
@@ -700,8 +705,217 @@ CephRbdAuthBuildServiceAuthorizer (
            ServiceAuth->SessionKey,
            CEPHX_AES_KEY_SIZE,
            Nonce,
+           FALSE,
+           0,
            Buffer,
            BufferCapacity,
            EncodedLength
            );
+}
+
+EFI_STATUS
+CephRbdAuthConnectOsd (
+  IN  CONST CEPH_RBD_MSGR_V1_CONNECT_CONFIG  *Config,
+  IN  CONST CEPH_RBD_SERVICE_AUTH           *OsdAuth,
+  OUT CEPH_RBD_MSGR_V1_CLIENT               *Client
+  )
+{
+  EFI_STATUS        Status;
+  UINT8             Authorizer[512];
+  UINTN             AuthorizerLength;
+  UINT64            ClientNonce;
+  UINT64            ServerChallenge;
+  CEPH_MSGR_V1_NEGOTIATION  Negotiation;
+
+  if ((Config == NULL) || (OsdAuth == NULL) || (Client == NULL) ||
+      !OsdAuth->Valid || (Config->RemotePort == 0) ||
+      (Config->TimeoutSeconds == 0))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  ZeroMem (Client, sizeof (*Client));
+  CephMsgrV1RetransmitQueueInit (&Client->Retransmit, 0);
+  Client->GlobalSequence = 1;
+  // A fresh messenger-v1 client starts at connect_seq 0 (ProtocolV1.h).
+  // Using 1 here makes the OSD treat the challenge round-trip as a reconnect
+  // against its not-yet-opened session (connect_seq 0) and RESET the session.
+  Client->ConnectSequence = 0;
+  Client->ClientNonce = Config->ClientNonce;
+  Client->RecoveryConfig = Config;
+
+  // Open the TCP connection to the OSD messenger-v1 endpoint.
+  Status = CephRbdTcp4Connect (
+             Config->ImageHandle,
+             Config->ControllerHandle,
+             &Config->RemoteAddress,
+             Config->RemotePort,
+             Config->TimeoutSeconds,
+             &Client->Connection
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  Client->Connected = TRUE;
+
+  Status = CephMsgrV1ExchangeBanners (
+             &Client->Connection,
+             &Config->RemoteAddress,
+             Config->RemotePort,
+             Config->TimeoutSeconds
+             );
+  if (EFI_ERROR (Status)) {
+    goto Fail;
+  }
+
+  // Fixed nonce: the authorizer is bound to the ticket and session key, and
+  // messenger v1 does not enforce a challenge replay window.
+  ClientNonce = 0x4f5344415554484BU;  // "OSDAUTHK" + 0xB
+
+  Status = CephRbdAuthBuildServiceAuthorizer (
+             OsdAuth,
+             ClientNonce,
+             Authorizer,
+             sizeof (Authorizer),
+             &AuthorizerLength
+             );
+  if (EFI_ERROR (Status)) {
+    goto Fail;
+  }
+
+  // First connect carries the base authorizer (no challenge).
+  Status = CephMsgrV1SendConnectAndReadReply (
+             &Client->Connection,
+             Config->SupportedFeatures,
+             Config->HostType,
+             Client->GlobalSequence,
+             Client->ConnectSequence,
+             Config->ProtocolVersion,
+             CEPH_AUTH_CEPHX,
+             Authorizer,
+             (UINT32)AuthorizerLength,
+             Config->Flags,
+             Config->RequiredFeatures,
+             Config->TimeoutSeconds,
+             &Client->Negotiation
+             );
+  if (EFI_ERROR (Status)) {
+    goto Fail;
+  }
+
+  // The OSD answers the first authorizer with a CHALLENGE_AUTHORIZER reply.
+  if (Client->Negotiation.Action == CephMsgrConnectNeedAuthorizerChallenge) {
+    if ((Client->Negotiation.AuthorizerReplyLength == 0) ||
+        (Client->Negotiation.AuthorizerReplyLength >
+         sizeof (Client->Negotiation.AuthorizerReply)))
+    {
+      Status = EFI_BAD_BUFFER_SIZE;
+      goto Fail;
+    }
+
+    Status = CephXDecodeAuthorizeChallengeSecret (
+               OsdAuth->SessionKey,
+               CEPHX_AES_KEY_SIZE,
+               Client->Negotiation.AuthorizerReply,
+               Client->Negotiation.AuthorizerReplyLength,
+               &ServerChallenge
+               );
+    if (EFI_ERROR (Status)) {
+      goto Fail;
+    }
+
+    // Rebuild the authorizer with have_challenge=1 and challenge+1.
+    ZeroMem (Authorizer, sizeof (Authorizer));
+    Status = CephXEncodeServiceAuthorizer (
+               OsdAuth->GlobalId,
+               OsdAuth->ServiceId,
+               OsdAuth->Ticket.SecretId,
+               OsdAuth->Ticket.Blob,
+               OsdAuth->Ticket.BlobLength,
+               OsdAuth->SessionKey,
+               CEPHX_AES_KEY_SIZE,
+               ClientNonce,
+               TRUE,
+               ServerChallenge + 1,
+               Authorizer,
+               sizeof (Authorizer),
+               &AuthorizerLength
+               );
+    if (EFI_ERROR (Status)) {
+      goto Fail;
+    }
+
+    Status = CephMsgrV1SendConnectAndReadReply (
+               &Client->Connection,
+               Config->SupportedFeatures,
+               Config->HostType,
+               Client->GlobalSequence,
+               Client->ConnectSequence,
+               Config->ProtocolVersion,
+               CEPH_AUTH_CEPHX,
+               Authorizer,
+               (UINT32)AuthorizerLength,
+               Config->Flags,
+               Config->RequiredFeatures,
+               Config->TimeoutSeconds,
+               &Negotiation
+               );
+    if (EFI_ERROR (Status)) {
+      goto Fail;
+    }
+    CopyMem (&Client->Negotiation, &Negotiation, sizeof (Negotiation));
+  }
+
+  if ((Client->Negotiation.Action != CephMsgrConnectReady) &&
+      (Client->Negotiation.Action != CephMsgrConnectAckSequence)) {
+    Status = EFI_ACCESS_DENIED;
+    goto Fail;
+  }
+
+  // Verify the final authorize reply (nonce+1 encrypted with the session key)
+  // before completing the SEQ exchange. The OSD embeds this in the READY/SEQ
+  // connect reply, not in a separate message.
+  if (Client->Negotiation.AuthorizerReplyLength != 0) {
+    Status = CephXVerifyAuthorizeReply (
+               OsdAuth->SessionKey,
+               CEPHX_AES_KEY_SIZE,
+               Client->Negotiation.AuthorizerReply,
+               Client->Negotiation.AuthorizerReplyLength,
+               ClientNonce,
+               Client->ConnectionSecret,
+               sizeof (Client->ConnectionSecret),
+               &Client->ConnectionSecretLength
+               );
+    if (EFI_ERROR (Status)) {
+      goto Fail;
+    }
+  }
+
+  if (Client->Negotiation.Action == CephMsgrConnectAckSequence) {
+    // CEPH_MSGR_TAG_SEQ: the OSD is ready but expects the connect-time
+    // sequence exchange before any frames are sent. FinishSeqRecovery also
+    // initializes the session, so do not call CephMsgrV1SessionInit here.
+    Status = CephRbdMsgrV1FinishSeqRecovery (Config, Client);
+  } else {
+    Status = CephMsgrV1SessionInit (
+               &Client->Session,
+               &Client->Connection,
+               &Client->Negotiation,
+               CEPH_MSGR_V1_SESSION_FRAME_MAX,
+               Config->TimeoutSeconds
+               );
+  }
+  if (EFI_ERROR (Status)) {
+    goto Fail;
+  }
+
+  ZeroMem (Authorizer, sizeof (Authorizer));
+  return EFI_SUCCESS;
+
+Fail:
+  ZeroMem (Authorizer, sizeof (Authorizer));
+  CephRbdTcp4Close (&Client->Connection, Config->TimeoutSeconds);
+  Client->Connected = FALSE;
+  Client->Session.Ready = FALSE;
+  return Status;
 }

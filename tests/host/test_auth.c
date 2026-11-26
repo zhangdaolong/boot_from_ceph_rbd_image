@@ -580,7 +580,7 @@ TestServiceTicketCodecs (VOID)
               0x1122334455667788ULL, CEPH_ENTITY_TYPE_OSD,
               OutSecretId, OutBlob, OutBlobLength,
               ExpectedServiceKey, CEPHX_AES_KEY_SIZE,
-              0x99ULL,
+              0x99ULL, FALSE, 0,
               Authorizer, sizeof (Authorizer), &AuthorizerLength) ==
             EFI_SUCCESS);
     assert (CephWireInit (&Cursor, Authorizer, AuthorizerLength) == EFI_SUCCESS);

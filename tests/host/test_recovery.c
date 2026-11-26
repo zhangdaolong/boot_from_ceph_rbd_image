@@ -75,7 +75,9 @@ TestCephXRoundTrip (VOID)
 
     Challenge[0] = 1;
     WriteLe64 (Challenge + 1, 0x0102030405060708ULL);
-    assert(CephXEncryptAes128Payload(
+    // The OSD sends the challenge as raw encode_encrypt_enc_bl ciphertext
+    // (no bufferlist length prefix), so use the raw encrypt helper here.
+    assert(CephXEncryptAes128RawPayload(
              Key, sizeof (Key), Challenge, sizeof (Challenge),
              ChallengeEncoded, sizeof (ChallengeEncoded),
              &EncodedLength) == EFI_SUCCESS);

@@ -60,6 +60,8 @@ main (
 {
   CEPH_RBD_MSGR_V1_CLIENT          Client;
   CEPH_RBD_MSGR_V1_CONNECT_CONFIG  Config;
+  CEPH_RBD_MSGR_V1_CLIENT          OsdClient;
+  CEPH_RBD_MSGR_V1_CONNECT_CONFIG  OsdConfig;
   CEPH_RBD_AUTH_SESSION            Session;
   CEPH_RBD_SERVICE_AUTH            OsdAuth;
   CEPH_MON_REQUEST_HEADER          Header;
@@ -117,7 +119,7 @@ main (
   Config.RemotePort = (Port != 0) ? Port : 40338;
   Config.SupportedFeatures = ~UINT64_C(0);
   Config.HostType = CEPH_MSGR_CONNECT_HOST_CLIENT;
-  Config.ProtocolVersion = 15;  // CEPH_MONC_PROTOCOL
+  Config.ProtocolVersion = CEPH_MONC_PROTOCOL;
   Config.AuthorizerProtocol = 0;
   Config.TimeoutSeconds = 15;
 
@@ -313,6 +315,49 @@ main (
         printf ("  osd%d: %u.%u.%u.%u:%u\n", (int)Addr->OsdId,
                 Bytes[0], Bytes[1], Bytes[2], Bytes[3],
                 (unsigned)Addr->Port);
+      }
+    }
+
+    // Connect to the primary OSD and authenticate with the OSD service
+    // ticket obtained earlier. Validate the connect-time CephX challenge
+    // round-trip against the live cluster.
+    if (OsdAuth.Valid && (OsdCount > 0)) {
+      UINT32  PrimaryIpv4;
+      UINT16  PrimaryPort;
+
+      Status = CephRbdPlacementGetOsdAddress (
+                 &Placement, OsdIds[0], &PrimaryIpv4, &PrimaryPort
+                 );
+      if (!EFI_ERROR (Status)) {
+        const UINT8 *Bytes = (const UINT8 *)&PrimaryIpv4;
+
+        memset (&OsdConfig, 0, sizeof (OsdConfig));
+        OsdConfig.ImageHandle = (EFI_HANDLE)&OsdClient;
+        OsdConfig.ControllerHandle = (EFI_HANDLE)&OsdConfig;
+        OsdConfig.RemoteAddress.Addr[0] = Bytes[0];
+        OsdConfig.RemoteAddress.Addr[1] = Bytes[1];
+        OsdConfig.RemoteAddress.Addr[2] = Bytes[2];
+        OsdConfig.RemoteAddress.Addr[3] = Bytes[3];
+        OsdConfig.RemotePort = PrimaryPort;
+        OsdConfig.SupportedFeatures = Config.SupportedFeatures;
+        OsdConfig.RequiredFeatures = Config.RequiredFeatures;
+        OsdConfig.HostType = CEPH_MSGR_CONNECT_HOST_CLIENT;
+        OsdConfig.ProtocolVersion = CEPH_OSDC_PROTOCOL;
+        OsdConfig.TimeoutSeconds = Config.TimeoutSeconds;
+        OsdConfig.ClientNonce = Config.ClientNonce;
+
+        Status = CephRbdAuthConnectOsd (&OsdConfig, &OsdAuth, &OsdClient);
+        printf ("osd_connect: osd=%d addr=%u.%u.%u.%u:%u status=%d "
+                "ready=%d action=%d\n",
+                (int)OsdIds[0], Bytes[0], Bytes[1], Bytes[2], Bytes[3],
+                (unsigned)PrimaryPort, Status,
+                OsdClient.Session.Ready,
+                (int)OsdClient.Negotiation.Action);
+        if (OsdClient.Connected) {
+          CephRbdMsgrV1ClientClose (&OsdClient, OsdConfig.TimeoutSeconds);
+        }
+      } else {
+        printf ("osd_connect: get addr status=%d\n", Status);
       }
     }
   }

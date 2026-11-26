@@ -23,6 +23,31 @@ typedef struct {
 } CEPH_MSGR_V1_NEGOTIATION;
 
 EFI_STATUS
+CephMsgrV1ExchangeBanners (
+  IN CEPH_RBD_TCP4_CONNECTION  *Connection,
+  IN CONST EFI_IPv4_ADDRESS    *RemoteAddress,
+  IN UINT16                    RemotePort,
+  IN UINT32                    TimeoutSeconds
+  );
+
+EFI_STATUS
+CephMsgrV1SendConnectAndReadReply (
+  IN CEPH_RBD_TCP4_CONNECTION  *Connection,
+  IN UINT64                    SupportedFeatures,
+  IN UINT32                    HostType,
+  IN UINT32                    GlobalSequence,
+  IN UINT32                    ConnectSequence,
+  IN UINT32                    ProtocolVersion,
+  IN UINT32                    AuthorizerProtocol,
+  IN CONST VOID                *Authorizer,
+  IN UINT32                    AuthorizerLength,
+  IN UINT8                     Flags,
+  IN UINT64                    RequiredFeatures,
+  IN UINT32                    TimeoutSeconds,
+  OUT CEPH_MSGR_V1_NEGOTIATION *Negotiation
+  );
+
+EFI_STATUS
 CephMsgrV1ClientHandshake (
   IN CEPH_RBD_TCP4_CONNECTION  *Connection,
   IN CONST EFI_IPv4_ADDRESS    *RemoteAddress,

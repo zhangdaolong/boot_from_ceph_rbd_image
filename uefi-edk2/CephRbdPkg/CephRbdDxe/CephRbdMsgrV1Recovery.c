@@ -363,7 +363,6 @@ CephRbdMsgrV1ApplySequences (
   }
 }
 
-STATIC
 EFI_STATUS
 CephRbdMsgrV1FinishSeqRecovery (
   IN CONST CEPH_RBD_MSGR_V1_CONNECT_CONFIG  *Config,

@@ -15,6 +15,12 @@
 #define CEPH_AUTH_NONE               0x1
 #define CEPH_AUTH_CEPHX              0x2
 
+// Messenger-v1 connect protocol versions from include/ceph_fs.h. The monitor
+// and OSD use DIFFERENT versions; sending the wrong one is rejected by the
+// peer with CEPH_MSGR_TAG_BADPROTOVER before authorizer verification.
+#define CEPH_MONC_PROTOCOL           15
+#define CEPH_OSDC_PROTOCOL           24
+
 // CephX request types from auth/cephx/CephxProtocol.h (CephXRequestHeader).
 #define CEPHX_GET_AUTH_SESSION_KEY       0x0100
 #define CEPHX_GET_PRINCIPAL_SESSION_KEY  0x0200
@@ -156,6 +162,18 @@ CephRbdAuthBuildServiceAuthorizer (
   OUT VOID                         *Buffer,
   IN  UINTN                        BufferCapacity,
   OUT UINTN                        *EncodedLength
+  );
+
+// Connect to an OSD messenger-v1 endpoint and authenticate with the OSD
+// service ticket. Config supplies the OSD address/port and transport settings;
+// its Authorizer fields are ignored (the authorizer is built from OsdAuth).
+// The function performs the connect-time CephX challenge round-trip and
+// leaves Client ready for OSD RPCs on success.
+EFI_STATUS
+CephRbdAuthConnectOsd (
+  IN  CONST CEPH_RBD_MSGR_V1_CONNECT_CONFIG  *Config,
+  IN  CONST CEPH_RBD_SERVICE_AUTH           *OsdAuth,
+  OUT CEPH_RBD_MSGR_V1_CLIENT               *Client
   );
 
 #endif

@@ -145,6 +145,20 @@ CephXEncodeAuthenticate (
   OUT UINTN         *EncodedLength
   );
 
+// Encrypt a struct_v(1)+AUTH_ENC_MAGIC+payload blob and emit the raw AES-128
+// ciphertext with no bufferlist length prefix (matching Ceph's
+// encode_encrypt_enc_bl(), used for authorizer challenges).
+EFI_STATUS
+CephXEncryptAes128RawPayload (
+  IN CONST UINT8  *Key,
+  IN UINTN        KeyLength,
+  IN CONST VOID   *Payload,
+  IN UINTN        PayloadLength,
+  OUT VOID        *Buffer,
+  IN UINTN        BufferLength,
+  OUT UINTN       *EncodedLength
+  );
+
 EFI_STATUS
 CephXEncryptAes128Payload (
   IN CONST UINT8  *Key,
@@ -163,6 +177,21 @@ CephXComputeAesChallengeResponse (
   IN UINT64       ServerChallenge,
   IN UINT64       ClientChallenge,
   OUT UINT64      *ChallengeResponse
+  );
+
+// Decrypt a raw CephX AES-128 ciphertext block (no bufferlist length prefix).
+// This is what Ceph's encode_encrypt_enc_bl() emits for authorizer challenges:
+// struct_v(1) + AUTH_ENC_MAGIC + payload, encrypted with the fixed Ceph IV and
+// PKCS#7 padding. Validates the padding, struct version and AUTH_ENC_MAGIC.
+EFI_STATUS
+CephXDecryptAes128RawPayload (
+  IN CONST UINT8  *Key,
+  IN UINTN        KeyLength,
+  IN CONST VOID   *Ciphertext,
+  IN UINTN        CiphertextLength,
+  OUT VOID        *Payload,
+  IN UINTN        PayloadCapacity,
+  OUT UINTN       *PayloadLength
   );
 
 // Decrypt a Ceph encode_encrypt payload produced by CephXEncryptAes128Payload.
@@ -274,8 +303,9 @@ CephXDecodeServiceTicket (
 //   u8 authorizer_v (=1), u64 global_id, u32 service_id,
 //   CephXTicketBlob ticket (u8 v=1, u64 secret_id, bufferlist blob),
 //   encode_encrypt(CephXAuthorize v2, SessionKey).
-// The encrypted CephXAuthorize carries a nonce and no challenge (the caller
-// can append a challenge round-trip later by re-encrypting with a nonce).
+// The encrypted CephXAuthorize carries a nonce. HaveChallenge and
+// ServerChallengePlusOne select the challenge round-trip form; pass FALSE/0
+// for the initial authorizer.
 EFI_STATUS
 CephXEncodeServiceAuthorizer (
   IN  UINT64        GlobalId,
@@ -286,6 +316,8 @@ CephXEncodeServiceAuthorizer (
   IN  CONST UINT8   *SessionKey,
   IN  UINTN         SessionKeyLength,
   IN  UINT64        Nonce,
+  IN  BOOLEAN       HaveChallenge,
+  IN  UINT64        ServerChallengePlusOne,
   OUT VOID          *Buffer,
   IN  UINTN         BufferCapacity,
   OUT UINTN         *EncodedLength
