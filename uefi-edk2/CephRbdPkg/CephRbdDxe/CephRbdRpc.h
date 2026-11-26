@@ -128,6 +128,11 @@ CephRpcDecodeMonMapEpoch (
   );
 
 // OSD RPC codecs.
+// Encode a legacy (v1) MOSDOp front payload. For CEPH_OSD_OP_CALL ops the
+// class name, method name and in-data are NOT part of the front; Ceph carries
+// them in the message data buffer, with each op's payload_len set to the
+// number of data bytes it consumes. Data/DataCapacity/DataLength may be NULL
+// when no CALL op is present (e.g. plain READ/STAT ops).
 EFI_STATUS
 CephRpcEncodeOsdOp (
   IN UINT32                         PoolId,
@@ -140,7 +145,10 @@ CephRpcEncodeOsdOp (
   IN UINTN                          OpCount,
   OUT VOID                          *Buffer,
   IN UINTN                          BufferLength,
-  OUT UINTN                         *EncodedLength
+  OUT UINTN                         *EncodedLength,
+  OUT VOID                          *Data  OPTIONAL,
+  IN UINTN                          DataCapacity  OPTIONAL,
+  OUT UINTN                         *DataLength  OPTIONAL
   );
 
 EFI_STATUS

@@ -160,7 +160,8 @@ TestOsdOpCodecs (VOID)
 
   assert(CephRpcEncodeOsdOp (
            3, 1, 42, 7, "rbd_data.abc.0000000000000000", 29,
-           &Op, 1, Front, sizeof (Front), &Length) == EFI_SUCCESS);
+           &Op, 1, Front, sizeof (Front), &Length,
+           NULL, 0, NULL) == EFI_SUCCESS);
   assert(Length > CEPH_OSD_OP_SIZE);
 
   // Verify the legacy v1 MOSDOp header fields are encoded in order:
@@ -244,14 +245,37 @@ TestOsdOpCodecs (VOID)
   Op.MethodNameLength = 10;
   Op.Indata = (CONST UINT8 *)"input";
   Op.IndataLength = 5;
-  assert(CephRpcEncodeOsdOp (
-           3, 1, 42, 8, "rbd_header.abc", 14,
-           &Op, 1, Front, sizeof (Front), &Length) == EFI_SUCCESS);
-  assert(CephWireInit (&Cursor, Front, Length) == EFI_SUCCESS);
-  // 70 bytes of header through num_ops, then op u16 + flags u32.
-  assert(CephWireSkip (&Cursor, 70 + 2 + 4) == EFI_SUCCESS);
-  assert(CephWireReadU8 (&Cursor, &ClassLen) == EFI_SUCCESS);
-  assert(ClassLen == 3);
+  {
+    UINT8 CallData[128];
+    UINTN CallDataLength;
+
+    assert(CephRpcEncodeOsdOp (
+             3, 1, 42, 8, "rbd_header.abc", 14,
+             &Op, 1, Front, sizeof (Front), &Length,
+             CallData, sizeof (CallData), &CallDataLength) == EFI_SUCCESS);
+    assert(CephWireInit (&Cursor, Front, Length) == EFI_SUCCESS);
+    // 70 bytes of header through num_ops, then op u16 + flags u32.
+    assert(CephWireSkip (&Cursor, 70 + 2 + 4) == EFI_SUCCESS);
+    assert(CephWireReadU8 (&Cursor, &ClassLen) == EFI_SUCCESS);
+    assert(ClassLen == 3);
+
+    // Ceph carries class name, method name and in-data in the message data
+    // buffer (concatenated), with the op's payload_len declaring the length.
+    assert(CallDataLength == 3 + 10 + 5);
+    assert(memcmp (CallData, "rbd", 3) == 0);
+    assert(memcmp (CallData + 3, "get_header", 10) == 0);
+    assert(memcmp (CallData + 13, "input", 5) == 0);
+    // payload_len is the last le32 of the 38-byte ceph_osd_op. 70 bytes of
+    // header + num_ops precede the op, payload_len sits at 70 + 34.
+    {
+      UINT32 PayloadLen;
+
+      assert(CephWireInit (&Cursor, Front, Length) == EFI_SUCCESS);
+      assert(CephWireSkip (&Cursor, 70 + 34) == EFI_SUCCESS);
+      assert(CephWireReadLe32 (&Cursor, &PayloadLen) == EFI_SUCCESS);
+      assert(PayloadLen == CallDataLength);
+    }
+  }
 }
 
 typedef struct {

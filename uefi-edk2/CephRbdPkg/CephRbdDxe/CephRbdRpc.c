@@ -383,11 +383,14 @@ STATIC
 EFI_STATUS
 CephRpcWriteOsdOp (
   IN OUT CEPH_WIRE_WRITER       *Writer,
-  IN CONST CEPH_OSD_OP_REQUEST  *Op
+  IN CONST CEPH_OSD_OP_REQUEST  *Op,
+  IN UINT32                     PayloadLength
   )
 {
   EFI_STATUS  Status;
 
+  // struct ceph_osd_op is a fixed 38-byte packed wire structure:
+  //   u16 op, u32 flags, 28-byte union, u32 payload_len.
   Status = CephWireWriteLe16 (Writer, Op->Op);
   if (!EFI_ERROR (Status)) {
     Status = CephWireWriteLe32 (Writer, Op->Flags);
@@ -395,31 +398,42 @@ CephRpcWriteOsdOp (
 
   if (!EFI_ERROR (Status)) {
     if (Op->Op == CEPH_OSD_OP_CALL) {
+      // cls union: u8 class_len, u8 method_len, u8 argc, le32 indata_len.
+      // The class/method/indata bytes themselves live in the message data
+      // buffer; here we only declare their lengths (Ceph merge...in_data).
       Status = CephWireWriteU8 (Writer, (UINT8)Op->ClassNameLength);
       if (!EFI_ERROR (Status)) {
         Status = CephWireWriteU8 (Writer, (UINT8)Op->MethodNameLength);
       }
-
       if (!EFI_ERROR (Status)) {
         Status = CephWireWriteU8 (Writer, 0);  // argc
       }
-
       if (!EFI_ERROR (Status)) {
         Status = CephWireWriteLe32 (
                    Writer,
-                   (UINT32)Op->IndataLength
+                   (UINT32)(Op->ClassNameLength + Op->MethodNameLength +
+                            Op->IndataLength)
                    );
       }
+      // The union is a fixed 28 bytes (sized by the extent variant); the cls
+      // variant uses only 7. Pad the remaining 21 bytes so payload_len lands
+      // at the correct 34-byte offset and the op occupies exactly 38 bytes.
+      {
+        UINTN  PadIndex;
+
+        for (PadIndex = 0; !EFI_ERROR (Status) && (PadIndex < 21); PadIndex++) {
+          Status = CephWireWriteU8 (Writer, 0);
+        }
+      }
     } else {
+      // extent union: le64 offset, length, truncate_size; le32 truncate_seq.
       Status = CephWireWriteLe64 (Writer, Op->Offset);
       if (!EFI_ERROR (Status)) {
         Status = CephWireWriteLe64 (Writer, Op->Length);
       }
-
       if (!EFI_ERROR (Status)) {
         Status = CephWireWriteLe64 (Writer, 0);  // truncate_size
       }
-
       if (!EFI_ERROR (Status)) {
         Status = CephWireWriteLe32 (Writer, 0);  // truncate_seq
       }
@@ -427,7 +441,9 @@ CephRpcWriteOsdOp (
   }
 
   if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe32 (Writer, 0);  // payload_len
+    // Number of bytes this op consumes in the message data buffer. Ceph's
+    // split_osd_op_vector_in_data() uses it to slice ops[i].indata.
+    Status = CephWireWriteLe32 (Writer, PayloadLength);
   }
 
   return Status;
@@ -445,13 +461,19 @@ CephRpcEncodeOsdOp (
   IN UINTN                          OpCount,
   OUT VOID                          *Buffer,
   IN UINTN                          BufferLength,
-  OUT UINTN                         *EncodedLength
+  OUT UINTN                         *EncodedLength,
+  OUT VOID                          *Data  OPTIONAL,
+  IN UINTN                          DataCapacity  OPTIONAL,
+  OUT UINTN                         *DataLength  OPTIONAL
   )
 {
-  CEPH_WIRE_WRITER  Writer;
-  EFI_STATUS        Status;
-  UINTN             Index;
-  UINTN             RequiredLength;
+  CEPH_WIRE_WRITER   Writer;
+  CEPH_WIRE_WRITER   DataWriter;
+  EFI_STATUS         Status;
+  UINTN              Index;
+  UINTN              RequiredLength;
+  UINTN              RequiredDataLength;
+  BOOLEAN            HasCall;
 
   if ((ObjectName == NULL) || (ObjectNameLength == 0) ||
       (ObjectNameLength > CEPH_RPC_MAX_COMMAND) || (Ops == NULL) ||
@@ -489,19 +511,38 @@ CephRpcEncodeOsdOp (
                    sizeof (UINT16) +
                    OpCount * CEPH_OSD_OP_SIZE +
                    ObjectNameLength;
+
+  // Ceph carries CALL class/method/indata bytes in the message data buffer,
+  // not in the front. Compute that data length and validate the caller-supplied
+  // data buffer when there is at least one CALL op.
+  RequiredDataLength = 0;
+  HasCall = FALSE;
   for (Index = 0; Index < OpCount; Index++) {
     if (Ops[Index].Op == CEPH_OSD_OP_CALL) {
-      RequiredLength += Ops[Index].ClassNameLength +
-                        Ops[Index].MethodNameLength +
-                        Ops[Index].IndataLength;
+      HasCall = TRUE;
+      RequiredDataLength += Ops[Index].ClassNameLength +
+                            Ops[Index].MethodNameLength +
+                            Ops[Index].IndataLength;
     }
   }
+  if (HasCall && ((Data == NULL) || (DataLength == NULL) ||
+                  (DataCapacity < RequiredDataLength)))
+  {
+    return EFI_BUFFER_TOO_SMALL;
+  }
+
   *EncodedLength = 0;
+  if (DataLength != NULL) {
+    *DataLength = 0;
+  }
   if (BufferLength < RequiredLength) {
     return EFI_BUFFER_TOO_SMALL;
   }
 
   Status = CephWireWriterInit (&Writer, Buffer, BufferLength);
+  if (!EFI_ERROR (Status) && HasCall) {
+    Status = CephWireWriterInit (&DataWriter, Data, DataCapacity);
+  }
 
   if (!EFI_ERROR (Status)) {
     Status = CephWireWriteLe32 (&Writer, ClientIncarnation);
@@ -556,26 +597,36 @@ CephRpcEncodeOsdOp (
   }
 
   for (Index = 0; !EFI_ERROR (Status) && (Index < OpCount); Index++) {
-    Status = CephRpcWriteOsdOp (&Writer, &Ops[Index]);
-    if (!EFI_ERROR (Status) && (Ops[Index].Op == CEPH_OSD_OP_CALL) &&
-        (Ops[Index].ClassNameLength != 0) &&
-        (Ops[Index].MethodNameLength != 0))
-    {
-      // NOTE: class-method input belongs in the message data buffer; keeping
-      // it inline here is a known limitation of this legacy encoder.
-      Status = CephWireWriteBytes (
-                 &Writer, Ops[Index].ClassName, Ops[Index].ClassNameLength
-                 );
-      if (!EFI_ERROR (Status)) {
+    UINT32  PayloadLength;
+
+    PayloadLength = 0;
+    if (Ops[Index].Op == CEPH_OSD_OP_CALL) {
+      // Ceph's OSDOp::merge_osd_op_vector_in_data() concatenates the class
+      // name, method name and in-data into one data-region buffer per op and
+      // records its length in payload_len. The OSD splits it back using the
+      // cls.class_len/method_len/indata_len fields encoded in the front.
+      PayloadLength = (UINT32)(Ops[Index].ClassNameLength +
+                               Ops[Index].MethodNameLength +
+                               Ops[Index].IndataLength);
+      if (!EFI_ERROR (Status) && (Ops[Index].ClassNameLength != 0)) {
         Status = CephWireWriteBytes (
-                   &Writer, Ops[Index].MethodName, Ops[Index].MethodNameLength
+                   &DataWriter, Ops[Index].ClassName, Ops[Index].ClassNameLength
+                   );
+      }
+      if (!EFI_ERROR (Status) && (Ops[Index].MethodNameLength != 0)) {
+        Status = CephWireWriteBytes (
+                   &DataWriter, Ops[Index].MethodName, Ops[Index].MethodNameLength
                    );
       }
       if (!EFI_ERROR (Status) && (Ops[Index].IndataLength != 0)) {
         Status = CephWireWriteBytes (
-                   &Writer, Ops[Index].Indata, Ops[Index].IndataLength
+                   &DataWriter, Ops[Index].Indata, Ops[Index].IndataLength
                    );
       }
+    }
+
+    if (!EFI_ERROR (Status)) {
+      Status = CephRpcWriteOsdOp (&Writer, &Ops[Index], PayloadLength);
     }
   }
 
@@ -588,6 +639,9 @@ CephRpcEncodeOsdOp (
   }
 
   *EncodedLength = Writer.Written;
+  if (DataLength != NULL) {
+    *DataLength = HasCall ? DataWriter.Written : 0;
+  }
   return EFI_SUCCESS;
 }
 

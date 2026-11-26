@@ -244,9 +244,12 @@ CephRbdBlockIoCallClassMethod (
   INT32                        OsdIds[CEPH_RBD_CRUSH_MAX_RESULT];
   UINTN                        OsdCount;
   UINT8                        Request[CEPH_RPC_MAX_METADATA];
+  UINT8                        OpData[CEPH_RPC_MAX_INDATA + CEPH_RPC_MAX_CLASS +
+                                       CEPH_RPC_MAX_METHOD];
   UINT8                        ReplyFront[CEPH_RPC_MAX_METADATA];
   UINT8                        ReplyData[CEPH_RPC_MAX_METADATA];
   UINTN                        RequestLength;
+  UINTN                        OpDataLength;
   UINTN                        ReplyFrontLength;
   UINTN                        ReplyDataLength;
   UINTN                        ClassNameLength;
@@ -322,7 +325,10 @@ CephRbdBlockIoCallClassMethod (
              1,
              Request,
              sizeof (Request),
-             &RequestLength
+             &RequestLength,
+             OpData,
+             sizeof (OpData),
+             &OpDataLength
              );
   if (EFI_ERROR (Status)) {
     return Status;
@@ -336,8 +342,8 @@ CephRbdBlockIoCallClassMethod (
              CEPH_MSG_OSD_OPREPLY,
              Request,
              RequestLength,
-             NULL,
-             0,
+             OpData,
+             OpDataLength,
              ReplyFront,
              sizeof (ReplyFront),
              &ReplyFrontLength,
@@ -815,7 +821,10 @@ CephRbdBlockIoReadBlocks (
                1,
                Request,
                sizeof (Request),
-               &RequestLength
+               &RequestLength,
+               NULL,
+               0,
+               NULL
                );
     if (EFI_ERROR (Status)) {
       return Status;

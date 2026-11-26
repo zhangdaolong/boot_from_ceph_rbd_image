@@ -416,7 +416,8 @@ main (
                      4, 1, (UINT32)Placement.Epoch, 1,
                      TestObject, sizeof (TestObject) - 1,
                      &ReadOp, 1,
-                     OpRequest, sizeof (OpRequest), &OpRequestLength
+                     OpRequest, sizeof (OpRequest), &OpRequestLength,
+                     NULL, 0, NULL
                      );
           if (!EFI_ERROR (Status)) {
             // Call directly (no auto-reconnect) so the real OSD op error is
