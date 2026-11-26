@@ -7,6 +7,9 @@
 #define CEPHX_REQUEST_GET_PRINCIPAL_KEY     0x0200
 #define CEPHX_REQUEST_GET_ROTATING_KEY      0x0400
 #define CEPHX_AES_KEY_SIZE                  16
+#define CEPHX_AES256_KEY_SIZE               32
+// Largest secret this firmware accepts: AES-256-KRB5 uses a 32-byte key.
+#define CEPHX_MAX_KEY_SIZE                  32
 #define CEPHX_MAX_ENCRYPTED_PAYLOAD         4096
 #define CEPHX_MAX_TICKET_BLOB               2048
 
@@ -51,7 +54,7 @@ typedef struct {
   UINT32  CreatedSeconds;
   UINT32  CreatedNanoseconds;
   UINT16  KeyLength;
-  UINT8   Key[CEPHX_AES_KEY_SIZE];
+  UINT8   Key[CEPHX_MAX_KEY_SIZE];
 } CEPHX_CRYPTO_KEY;
 
 // Decoded fields of a CephXTicketBlob. Blob points into the caller buffer.
@@ -229,7 +232,8 @@ CephXDecodeAuthSessionKey (
   OUT UINT64       *TicketSecretId,  OPTIONAL
   OUT VOID         *TicketBlob,  OPTIONAL
   IN  UINTN        TicketBlobCapacity,
-  OUT UINTN        *TicketBlobLength  OPTIONAL
+  OUT UINTN        *TicketBlobLength  OPTIONAL,
+  OUT UINTN        *SessionKeyLength  OPTIONAL
   );
 
 // Decode the version-1 CephXTicketBlob wrapper. The returned Blob pointer
@@ -296,7 +300,8 @@ CephXDecodeServiceTicket (
   OUT UINT64       *TicketSecretId,  OPTIONAL
   OUT VOID         *TicketBlob,  OPTIONAL
   IN  UINTN        TicketBlobCapacity,
-  OUT UINTN        *TicketBlobLength  OPTIONAL
+  OUT UINTN        *TicketBlobLength  OPTIONAL,
+  OUT UINTN        *ServiceSessionKeyLength  OPTIONAL
   );
 
 // Build a CephXAuthorizer blob for a service. Layout:

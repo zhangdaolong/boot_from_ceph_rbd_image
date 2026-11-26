@@ -542,7 +542,7 @@ main (
           GptCtx.Pool = &OsdPool;
           GptCtx.Device = &Device;
           Status = CephRbdGptDiscoverEsp (
-                     ProbeReadLba, &GptCtx, LastLba, &Esp
+                     ProbeReadLba, &GptCtx, LastLba, &Esp, NULL
                      );
           printf ("gpt_esp: status=%d last_lba=%llu", Status,
                   (unsigned long long)LastLba);

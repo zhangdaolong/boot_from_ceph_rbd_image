@@ -2,8 +2,7 @@
 #define TEST_DRIVER_BINDING_H_
 
 #include <Uefi.h>
-
-typedef struct _EFI_DEVICE_PATH_PROTOCOL EFI_DEVICE_PATH_PROTOCOL;
+#include <Protocol/DevicePath.h>
 
 extern EFI_GUID gEfiDriverBindingProtocolGuid;
 

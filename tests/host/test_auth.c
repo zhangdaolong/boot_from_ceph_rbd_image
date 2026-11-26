@@ -299,7 +299,7 @@ TestDecodeAuthSessionKey (VOID)
             ResultBl, ResultBlLength,
             ClientSecret, CEPHX_AES_KEY_SIZE,
             OutKey, sizeof (OutKey),
-            NULL, NULL, 0, NULL) == EFI_SUCCESS);
+            NULL, NULL, 0, NULL, NULL) == EFI_SUCCESS);
   assert (memcmp (OutKey, ExpectedKey, CEPHX_AES_KEY_SIZE) == 0);
 
   // Wrong secret, tampered ciphertext, truncated buffer and bad args are
@@ -309,21 +309,21 @@ TestDecodeAuthSessionKey (VOID)
     memset (WrongSecret, 0x77, sizeof (WrongSecret));
     assert (CephXDecodeAuthSessionKey (
               ResultBl, ResultBlLength, WrongSecret, CEPHX_AES_KEY_SIZE,
-              OutKey, sizeof (OutKey), NULL, NULL, 0, NULL) != EFI_SUCCESS);
+              OutKey, sizeof (OutKey), NULL, NULL, 0, NULL, NULL) != EFI_SUCCESS);
   }
   ResultBl[Offset / 2] ^= 0x01;
   assert (CephXDecodeAuthSessionKey (
             ResultBl, ResultBlLength, ClientSecret, CEPHX_AES_KEY_SIZE,
-            OutKey, sizeof (OutKey), NULL, NULL, 0, NULL) != EFI_SUCCESS);
+            OutKey, sizeof (OutKey), NULL, NULL, 0, NULL, NULL) != EFI_SUCCESS);
   assert (CephXDecodeAuthSessionKey (
             ResultBl, ResultBlLength / 2, ClientSecret, CEPHX_AES_KEY_SIZE,
-            OutKey, sizeof (OutKey), NULL, NULL, 0, NULL) != EFI_SUCCESS);
+            OutKey, sizeof (OutKey), NULL, NULL, 0, NULL, NULL) != EFI_SUCCESS);
   assert (CephXDecodeAuthSessionKey (
             NULL, ResultBlLength, ClientSecret, CEPHX_AES_KEY_SIZE,
-            OutKey, sizeof (OutKey), NULL, NULL, 0, NULL) == EFI_INVALID_PARAMETER);
+            OutKey, sizeof (OutKey), NULL, NULL, 0, NULL, NULL) == EFI_INVALID_PARAMETER);
   assert (CephXDecodeAuthSessionKey (
             ResultBl, ResultBlLength, ClientSecret, CEPHX_AES_KEY_SIZE,
-            OutKey, 8, NULL, NULL, 0, NULL) == EFI_INVALID_PARAMETER);
+            OutKey, 8, NULL, NULL, 0, NULL, NULL) == EFI_INVALID_PARAMETER);
 
 }
 
@@ -419,7 +419,7 @@ TestDecodeAuthTicket (VOID)
             ResultBl, ResultBlLength,
             ClientSecret, CEPHX_AES_KEY_SIZE,
             OutKey, sizeof (OutKey),
-            &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength) ==
+            &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength, NULL) ==
           EFI_SUCCESS);
   assert (memcmp (OutKey, ExpectedKey, CEPHX_AES_KEY_SIZE) == 0);
   assert (OutSecretId == 0x123456789abcdef0ULL);
@@ -432,7 +432,7 @@ TestDecodeAuthTicket (VOID)
             ResultBl, ResultBlLength,
             ClientSecret, CEPHX_AES_KEY_SIZE,
             OutKey, sizeof (OutKey),
-            &OutSecretId, OutBlob, 4, &OutBlobLength) == EFI_BUFFER_TOO_SMALL);
+            &OutSecretId, OutBlob, 4, &OutBlobLength, NULL) == EFI_BUFFER_TOO_SMALL);
 }
 
 static void
@@ -534,7 +534,7 @@ TestServiceTicketCodecs (VOID)
             PrincipalKey, CEPHX_AES_KEY_SIZE,
             CEPH_ENTITY_TYPE_OSD,
             OutKey, sizeof (OutKey),
-            &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength) ==
+            &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength, NULL) ==
           EFI_SUCCESS);
   assert (memcmp (OutKey, ExpectedServiceKey, CEPHX_AES_KEY_SIZE) == 0);
   assert (OutSecretId == 0xfedcba9876543210ULL);
@@ -547,7 +547,7 @@ TestServiceTicketCodecs (VOID)
             PrincipalKey, CEPHX_AES_KEY_SIZE,
             CEPH_ENTITY_TYPE_MON,
             OutKey, sizeof (OutKey),
-            &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength) ==
+            &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength, NULL) ==
           EFI_NOT_FOUND);
 
   // Wrong principal key is rejected.
@@ -559,7 +559,7 @@ TestServiceTicketCodecs (VOID)
               WrongKey, CEPHX_AES_KEY_SIZE,
               CEPH_ENTITY_TYPE_OSD,
               OutKey, sizeof (OutKey),
-              &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength) !=
+              &OutSecretId, OutBlob, sizeof (OutBlob), &OutBlobLength, NULL) !=
             EFI_SUCCESS);
   }
 

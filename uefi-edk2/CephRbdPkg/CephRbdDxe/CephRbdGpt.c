@@ -190,13 +190,18 @@ CephRbdGptFindEspInTable (
   IN UINTN                       TableLength,
   IN CONST CEPH_RBD_GPT_HEADER   *Header,
   IN UINT32                      ExpectedCrc,
-  OUT CEPH_RBD_GPT_PARTITION     *Esp
+  OUT CEPH_RBD_GPT_PARTITION     *Esp,
+  OUT OPTIONAL UINT32            *PartitionNumber
   )
 {
   UINTN                 RequiredLength;
   UINT32                ComputedCrc;
   UINTN                 Index;
   EFI_STATUS            Status;
+
+  if (PartitionNumber != NULL) {
+    *PartitionNumber = 0;
+  }
 
   if ((Table == NULL) || (Header == NULL) || (Esp == NULL) ||
       (Header->PartitionEntrySize == 0) ||
@@ -228,6 +233,9 @@ CephRbdGptFindEspInTable (
     }
     if (CephRbdGptIsEsp (&Partition)) {
       CopyMem (Esp, &Partition, sizeof (Partition));
+      if (PartitionNumber != NULL) {
+        *PartitionNumber = (UINT32)Index + 1;  // GPT numbers are 1-based
+      }
       return EFI_SUCCESS;
     }
   }
@@ -236,10 +244,11 @@ CephRbdGptFindEspInTable (
 
 EFI_STATUS
 CephRbdGptDiscoverEsp (
-  IN     CEPH_RBD_GPT_READ_LBA   ReadLba,
-  IN     VOID                   *Context,
-  IN     UINT64                 LastLba,
-  OUT    CEPH_RBD_GPT_PARTITION *Esp
+  IN     CEPH_RBD_GPT_READ_LBA    ReadLba,
+  IN     VOID                    *Context,
+  IN     UINT64                  LastLba,
+  OUT    CEPH_RBD_GPT_PARTITION  *Esp,
+  OUT OPTIONAL UINT32            *PartitionNumber
   )
 {
   EFI_STATUS             Status;
@@ -313,7 +322,7 @@ CephRbdGptDiscoverEsp (
   }
 
   Status = CephRbdGptFindEspInTable (
-             Table, TableLength, &Header, ExpectedCrc, Esp
+             Table, TableLength, &Header, ExpectedCrc, Esp, PartitionNumber
              );
   FreePool (Table);
   return Status;

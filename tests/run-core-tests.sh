@@ -15,6 +15,9 @@ cc -std=c11 -Wall -Wextra -Werror \
   -I"$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe" \
   -I"$repo_root/bios/stage2" \
   -DCRUSH_VECTOR_DIR="\"$repo_root/tests/vectors\"" \
+  -DCEPH_RBD_CONFIG_HOST_TEST \
+  -DCEPH_RBD_NETWORK_HOST_TEST \
+  -DCEPH_RBD_SECRET_RESOLVER_HOST_TEST \
   "$repo_root/tests/host/test_core.c" \
   "$repo_root/tests/host/test_crypto.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdDxe.c" \
@@ -24,15 +27,19 @@ cc -std=c11 -Wall -Wextra -Werror \
   "$repo_root/tests/host/test_blockio.c" \
   "$repo_root/tests/host/test_config.c" \
   "$repo_root/tests/host/test_auth.c" \
+  "$repo_root/tests/host/test_aes256.c" \
   "$repo_root/tests/host/test_crush.c" \
   "$repo_root/tests/host/test_placement.c" \
   "$repo_root/tests/host/test_gpt.c" \
+  "$repo_root/tests/host/test_network.c" \
+  "$repo_root/tests/host/test_secret_resolver.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdWire.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdCrush.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdPlacement.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdConfig.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdMessenger.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdCephX.c" \
+  "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdCephXAes256.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdMsgrV1Handshake.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdMsgrV1Transport.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdMsgrV1Session.c" \
@@ -45,7 +52,26 @@ cc -std=c11 -Wall -Wextra -Werror \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdLayout.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdFormat2.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdGpt.c" \
+  "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdNetwork.c" \
+  "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdSecretResolver.c" \
   "$repo_root/bios/stage2/ceph_stage2.c" \
   -lcrypto \
+  -o "$test_binary"
+"$test_binary"
+cc -std=c11 -Wall -Wextra -Werror \
+  -I"$repo_root/bios/stage2" \
+  "$repo_root/tests/host/test_pxe_undi.c" \
+  "$repo_root/bios/stage2/pxe_undi.c" \
+  "$repo_root/bios/stage2/ceph_stage2.c" \
+  -o "$build_dir/pxe-undi-tests"
+"$build_dir/pxe-undi-tests"
+rm -f "$build_dir/pxe-undi-tests"
+cc -std=c11 -Wall -Wextra -Werror \
+  -DCEPH_RBD_BOOT_MANAGER_HOST_TEST \
+  -I"$repo_root/tests/host/include" \
+  -I"$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe" \
+  "$repo_root/tests/host/test_boot_manager.c" \
+  "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdBootManager.c" \
+  "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdGpt.c" \
   -o "$test_binary"
 "$test_binary"

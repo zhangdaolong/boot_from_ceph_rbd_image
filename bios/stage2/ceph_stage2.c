@@ -1,4 +1,14 @@
 #include "ceph_stage2.h"
+#include "ceph_stage2_network.h"
+
+/*
+ * PXE/UNDI operations table. It starts empty so that the disk-only core has
+ * no link-time dependency on the PXE module; PxeUndiInstallNetOps() fills it
+ * when the PXE driver is present.
+ */
+PXE_UNDI_NET_OPS gCephBiosPxeUndiOps = { 0 };
+
+static PXE_UNDI_CONTEXT mPxeUndiContext;
 
 static uint32_t
 ReadLe32(const uint8_t *Data)
@@ -83,5 +93,147 @@ CephBiosStage2LoadPartitionSector(
   }
 
   *PartitionStartLba = start_lba;
+  return CEPH_BIOS_SUCCESS;
+}
+
+int
+CephBiosStage2InitNetwork(
+  const PXE_UNDI_PLATFORM *Platform,
+  CEPH_BIOS_NETWORK *Network
+  )
+{
+  PXE_UNDI_NET_OPS *ops = &gCephBiosPxeUndiOps;
+  PXENV_UNDI_GET_NIC_TYPE_PARAMS nic;
+  PXENV_UNDI_GET_INFORMATION_PARAMS info;
+  uint16_t filter;
+  int result;
+
+  if (Network == NULL) {
+    return CEPH_BIOS_INVALID_ARGUMENT;
+  }
+  Network->Send = NULL;
+  Network->Receive = NULL;
+  Network->Context = NULL;
+
+  /* No registered PXE/UNDI stack: keep the original disk-only behaviour. */
+  if (Platform == NULL || ops->Discover == NULL || ops->Startup == NULL ||
+      ops->Initialize == NULL || ops->GetNicType == NULL ||
+      ops->GetInformation == NULL || ops->SetStationAddress == NULL ||
+      ops->Open == NULL || ops->SendFrame == NULL ||
+      ops->ReceiveFrame == NULL) {
+    return CEPH_BIOS_NETWORK_NOT_AVAILABLE;
+  }
+
+  result = ops->Discover(Platform, &mPxeUndiContext);
+  if (result != PXE_UNDI_SUCCESS) {
+    return CEPH_BIOS_NETWORK_NOT_AVAILABLE;
+  }
+
+  result = ops->Startup(&mPxeUndiContext);
+  if (result != PXE_UNDI_SUCCESS) {
+    goto fail;
+  }
+  result = ops->Initialize(&mPxeUndiContext, NULL);
+  if (result != PXE_UNDI_SUCCESS) {
+    goto fail;
+  }
+  result = ops->GetNicType(&mPxeUndiContext, &nic);
+  if (result != PXE_UNDI_SUCCESS) {
+    goto fail;
+  }
+  result = ops->GetInformation(&mPxeUndiContext, &info);
+  if (result != PXE_UNDI_SUCCESS) {
+    goto fail;
+  }
+  result = ops->SetStationAddress(&mPxeUndiContext, info.PermNodeAddress);
+  if (result != PXE_UNDI_SUCCESS) {
+    goto fail;
+  }
+
+  filter = PXE_UNDI_FLTR_DIRECTED | PXE_UNDI_FLTR_BROADCAST;
+  result = ops->Open(&mPxeUndiContext, filter);
+  if (result != PXE_UNDI_SUCCESS) {
+    goto fail;
+  }
+
+  Network->Send = ops->SendFrame;
+  Network->Receive = ops->ReceiveFrame;
+  Network->Context = &mPxeUndiContext;
+  return CEPH_BIOS_SUCCESS;
+
+fail:
+  if (ops->Shutdown != NULL) {
+    ops->Shutdown(&mPxeUndiContext);
+  }
+  return CEPH_BIOS_IO_ERROR;
+}
+
+int
+CephBiosStage2ShutdownNetwork(
+  CEPH_BIOS_NETWORK *Network
+  )
+{
+  PXE_UNDI_NET_OPS *ops = &gCephBiosPxeUndiOps;
+  int status = CEPH_BIOS_SUCCESS;
+  int result;
+
+  if (Network == NULL || Network->Context == NULL) {
+    return CEPH_BIOS_INVALID_ARGUMENT;
+  }
+
+  if (ops->Close != NULL) {
+    result = ops->Close(&mPxeUndiContext);
+    if (result != PXE_UNDI_SUCCESS) {
+      status = CEPH_BIOS_IO_ERROR;
+    }
+  }
+  if (ops->Shutdown != NULL) {
+    result = ops->Shutdown(&mPxeUndiContext);
+    if (result != PXE_UNDI_SUCCESS) {
+      status = CEPH_BIOS_IO_ERROR;
+    }
+  }
+
+  Network->Send = NULL;
+  Network->Receive = NULL;
+  Network->Context = NULL;
+  return status;
+}
+
+int
+CephBiosStage2SendFrame(
+  CEPH_BIOS_NETWORK *Network,
+  const uint8_t *Frame,
+  size_t Length
+  )
+{
+  if (Network == NULL || Network->Send == NULL) {
+    return CEPH_BIOS_NETWORK_NOT_AVAILABLE;
+  }
+  if (Network->Send(Network->Context, Frame, Length) != PXE_UNDI_SUCCESS) {
+    return CEPH_BIOS_IO_ERROR;
+  }
+  return CEPH_BIOS_SUCCESS;
+}
+
+int
+CephBiosStage2ReceiveFrame(
+  CEPH_BIOS_NETWORK *Network,
+  uint8_t *Frame,
+  size_t *Length
+  )
+{
+  int result;
+
+  if (Network == NULL || Network->Receive == NULL) {
+    return CEPH_BIOS_NETWORK_NOT_AVAILABLE;
+  }
+  result = Network->Receive(Network->Context, Frame, Length);
+  if (result == PXE_UNDI_NO_PACKET) {
+    return CEPH_BIOS_NETWORK_NOT_AVAILABLE;
+  }
+  if (result != PXE_UNDI_SUCCESS) {
+    return CEPH_BIOS_IO_ERROR;
+  }
   return CEPH_BIOS_SUCCESS;
 }

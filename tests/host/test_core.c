@@ -20,6 +20,9 @@ void TestAuthCodecs(void);
 void TestCrushPlacement(void);
 void TestPlacement(void);
 void TestGpt(void);
+void TestAes256Krb5(void);
+void TestNetwork(void);
+void TestSecretResolver(void);
 
 static void
 WriteLe32(uint8_t *Buffer, uint32_t Value)
@@ -509,6 +512,9 @@ main(void)
   TestCrushPlacement();
   TestPlacement();
   TestGpt();
+  TestAes256Krb5();
+  TestNetwork();
+  TestSecretResolver();
   puts("core firmware tests: passed");
   return 0;
 }

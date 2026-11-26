@@ -3,6 +3,15 @@
 #include <Library/UefiRuntimeServicesTableLib.h>
 #include "CephRbdConfig.h"
 
+// The configuration blob lives in a fixed UEFI variable. Host tests supply
+// their own copy of this name (and of gCephRbdConfigGuid) in test_config.c;
+// the firmware build uses the definitions here.
+#ifndef CEPH_RBD_CONFIG_HOST_TEST
+CONST CHAR16  gCephRbdConfigVariableName[] = {
+  'C', 'e', 'p', 'h', 'R', 'b', 'd', 'C', 'o', 'n', 'f', 'i', 'g', 0
+};
+#endif
+
 EFI_STATUS
 CephRbdConfigValidate (
   IN CONST CEPH_RBD_CONFIG  *Config
@@ -57,7 +66,9 @@ CephRbdConfigValidate (
   }
 
   if ((Config->Flags & ~(CEPH_RBD_CONFIG_FLAG_KEY_REFERENCE |
-                         CEPH_RBD_CONFIG_FLAG_START_ON_ENTRY)) != 0)
+                         CEPH_RBD_CONFIG_FLAG_START_ON_ENTRY |
+                         CEPH_RBD_CONFIG_FLAG_BOOT_MANAGER |
+                         CEPH_RBD_CONFIG_FLAG_TRY_BOOT)) != 0)
   {
     return EFI_INVALID_PARAMETER;
   }

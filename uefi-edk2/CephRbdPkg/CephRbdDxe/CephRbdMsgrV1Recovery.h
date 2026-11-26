@@ -2,6 +2,7 @@
 #define CEPH_RBD_MSGR_V1_RECOVERY_H_
 
 #include <Uefi.h>
+#include "CephRbdNetwork.h"
 #include <Protocol/Tcp4.h>
 #include "CephRbdMessenger.h"
 #include "CephRbdMsgrV1Handshake.h"
@@ -49,6 +50,10 @@ typedef struct {
   UINT32                  TimeoutSeconds;
   UINT32                  MaxConnectAttempts;
   UINT64                  ClientNonce;
+  // Optional resolved local-IP configuration from CephRbdNetwork. When NULL,
+  // the TCP4 layer uses the platform default (DHCP) station address.
+  CEPH_RBD_LOCAL_IP_CONFIG  LocalIp;
+  BOOLEAN                   UseExplicitLocalIp;
 } CEPH_RBD_MSGR_V1_CONNECT_CONFIG;
 
 typedef struct {

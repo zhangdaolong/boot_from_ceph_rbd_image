@@ -459,12 +459,13 @@ CephRbdMsgrV1TryConnect (
   CEPH_RECOVERY_DISPOSITION  Disposition;
 
   *Status = EFI_SUCCESS;
-  ConnectStatus = CephRbdTcp4Connect (
+  ConnectStatus = CephRbdTcp4ConnectEx (
                     Config->ImageHandle,
                     Config->ControllerHandle,
                     &Config->RemoteAddress,
                     Config->RemotePort,
                     Config->TimeoutSeconds,
+                    Config->UseExplicitLocalIp ? &Config->LocalIp : NULL,
                     &Client->Connection
                     );
   if (EFI_ERROR (ConnectStatus)) {

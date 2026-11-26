@@ -3,6 +3,7 @@
 #include <Library/BaseMemoryLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include "CephRbdCephX.h"
+#include "CephRbdCephXAes256.h"
 #include "CephRbdWire.h"
 
 #define CEPHX_AUTH_ENC_MAGIC  0xff009cad8826aa55ULL
@@ -14,8 +15,9 @@ STATIC CONST UINT8  mCephAesIv[16] = {
 
 STATIC
 EFI_STATUS
-CephXAes128CbcDecrypt (
+CephXAesCbcDecrypt (
   IN CONST UINT8  *Key,
+  IN UINTN        KeyLength,
   IN CONST VOID   *Ciphertext,
   IN UINTN        CiphertextLength,
   OUT VOID        *Plaintext,
@@ -62,7 +64,7 @@ CephXAes128CbcDecrypt (
     return EFI_OUT_OF_RESOURCES;
   }
 
-  Result = AesInit (AesContext, Key, 128);
+  Result = AesInit (AesContext, Key, KeyLength * 8);
   if (Result) {
     Result = AesCbcDecrypt (
                AesContext,
@@ -109,8 +111,9 @@ Done:
 
 STATIC
 EFI_STATUS
-CephXAes128CbcEncrypt (
+CephXAesCbcEncrypt (
   IN CONST UINT8  *Key,
+  IN UINTN        KeyLength,
   IN CONST VOID   *Plaintext,
   IN UINTN        PlaintextLength,
   OUT VOID        *Ciphertext,
@@ -160,7 +163,7 @@ CephXAes128CbcEncrypt (
 
   CopyMem (Padded, Plaintext, PlaintextLength);
   SetMem (Padded + PlaintextLength, PaddingLength, (UINT8)PaddingLength);
-  Result = AesInit (AesContext, Key, 128);
+  Result = AesInit (AesContext, Key, KeyLength * 8);
   if (Result) {
     Result = AesCbcEncrypt (
                AesContext,
@@ -180,6 +183,66 @@ CephXAes128CbcEncrypt (
   ZeroMem (AesContext, AesContextSize);
   FreePool (AesContext);
   return Status;
+}
+
+// Dispatch a CephX encrypt operation by secret length. A 16-byte secret is
+// CEPH_CRYPTO_AES (AES-128-CBC with PKCS#7); a 32-byte secret is
+// CEPH_CRYPTO_AES256KRB5 (AES-256-CBC-CTS + HMAC-SHA384). Everything above
+// this layer is shared between the two crypto types.
+STATIC
+EFI_STATUS
+CephXCipherEncrypt (
+  IN  CONST UINT8  *Key,
+  IN  UINTN        KeyLength,
+  IN  CONST UINT8  *Plaintext,
+  IN  UINTN        PlaintextLength,
+  OUT UINT8        *Ciphertext,
+  IN  UINTN        CiphertextCapacity,
+  OUT UINTN        *CiphertextLength
+  )
+{
+  if (KeyLength == CEPHX_AES_KEY_SIZE) {
+    return CephXAesCbcEncrypt (
+             Key, KeyLength, Plaintext, PlaintextLength,
+             Ciphertext, CiphertextCapacity, CiphertextLength
+             );
+  }
+  if (KeyLength == CEPHX_AES256_KEY_SIZE) {
+    return CephXAes256Krb5Encrypt (
+             Key, KeyLength, CEPHX_KRB5_USAGE_DEFAULT,
+             Plaintext, PlaintextLength,
+             Ciphertext, CiphertextCapacity, CiphertextLength
+             );
+  }
+  return EFI_UNSUPPORTED;
+}
+
+STATIC
+EFI_STATUS
+CephXCipherDecrypt (
+  IN  CONST UINT8  *Key,
+  IN  UINTN        KeyLength,
+  IN  CONST UINT8  *Ciphertext,
+  IN  UINTN        CiphertextLength,
+  OUT UINT8        *Plaintext,
+  IN  UINTN        PlaintextCapacity,
+  OUT UINTN        *PlaintextLength
+  )
+{
+  if (KeyLength == CEPHX_AES_KEY_SIZE) {
+    return CephXAesCbcDecrypt (
+             Key, KeyLength, Ciphertext, CiphertextLength,
+             Plaintext, PlaintextCapacity, PlaintextLength
+             );
+  }
+  if (KeyLength == CEPHX_AES256_KEY_SIZE) {
+    return CephXAes256Krb5Decrypt (
+             Key, KeyLength, CEPHX_KRB5_USAGE_DEFAULT,
+             Ciphertext, CiphertextLength,
+             Plaintext, PlaintextCapacity, PlaintextLength
+             );
+  }
+  return EFI_UNSUPPORTED;
 }
 
 EFI_STATUS
@@ -579,7 +642,9 @@ CephXEncryptAes128RawPayload (
     return EFI_INVALID_PARAMETER;
   }
 
-  if (KeyLength != CEPHX_AES_KEY_SIZE) {
+  if ((KeyLength != CEPHX_AES_KEY_SIZE) &&
+      (KeyLength != CEPHX_AES256_KEY_SIZE))
+  {
     return EFI_UNSUPPORTED;
   }
 
@@ -597,13 +662,18 @@ CephXEncryptAes128RawPayload (
     CopyMem (Plaintext + 9, Payload, PayloadLength);
   }
 
-  if (BufferLength < PlaintextLength + 16) {
+  // AES-128 adds at most one PKCS#7 block; AES-256-KRB5 adds a 16-byte
+  // confounder and a 24-byte HMAC tag. Reserve the larger bound for both.
+  if (BufferLength < PlaintextLength + CEPHX_KRB5_CONFOUNDER_SIZE +
+                     CEPHX_KRB5_HASH_SIZE)
+  {
     ZeroMem (Plaintext, sizeof (Plaintext));
     return EFI_BUFFER_TOO_SMALL;
   }
 
-  Status = CephXAes128CbcEncrypt (
+  Status = CephXCipherEncrypt (
              Key,
+             KeyLength,
              Plaintext,
              PlaintextLength,
              Buffer,
@@ -638,7 +708,9 @@ CephXEncryptAes128Payload (
     return EFI_INVALID_PARAMETER;
   }
 
-  if (KeyLength != CEPHX_AES_KEY_SIZE) {
+  if ((KeyLength != CEPHX_AES_KEY_SIZE) &&
+      (KeyLength != CEPHX_AES256_KEY_SIZE))
+  {
     return EFI_UNSUPPORTED;
   }
 
@@ -660,8 +732,9 @@ CephXEncryptAes128Payload (
   if (PayloadLength != 0) {
     CopyMem (Plaintext + 9, Payload, PayloadLength);
   }
-  Status = CephXAes128CbcEncrypt (
+  Status = CephXCipherEncrypt (
              Key,
+             KeyLength,
              Plaintext,
              PlaintextLength,
              Ciphertext,
@@ -718,7 +791,9 @@ CephXComputeAesChallengeResponse (
     return EFI_INVALID_PARAMETER;
   }
 
-  if (KeyLength != CEPHX_AES_KEY_SIZE) {
+  if ((KeyLength != CEPHX_AES_KEY_SIZE) &&
+      (KeyLength != CEPHX_AES256_KEY_SIZE))
+  {
     return EFI_UNSUPPORTED;
   }
 
@@ -795,20 +870,22 @@ CephXDecryptAes128RawPayload (
     return EFI_INVALID_PARAMETER;
   }
 
-  if (KeyLength != CEPHX_AES_KEY_SIZE) {
+  if ((KeyLength != CEPHX_AES_KEY_SIZE) &&
+      (KeyLength != CEPHX_AES256_KEY_SIZE))
+  {
     return EFI_UNSUPPORTED;
   }
 
   *PayloadLength = 0;
-  if ((CiphertextLength == 0) ||
-      (CiphertextLength > sizeof (Plaintext)) ||
-      ((CiphertextLength & 15) != 0))
-  {
+  // AES-128 ciphertexts are a multiple of 16; AES-256-KRB5 ciphertexts are
+  // CTS-sized and carry a 24-byte tag, so do not enforce block alignment.
+  if ((CiphertextLength == 0) || (CiphertextLength > sizeof (Plaintext))) {
     return EFI_BAD_BUFFER_SIZE;
   }
 
-  Status = CephXAes128CbcDecrypt (
+  Status = CephXCipherDecrypt (
              Key,
+             KeyLength,
              Ciphertext,
              CiphertextLength,
              Plaintext,
@@ -871,7 +948,9 @@ CephXDecryptAes128Payload (
     return EFI_INVALID_PARAMETER;
   }
 
-  if (KeyLength != CEPHX_AES_KEY_SIZE) {
+  if ((KeyLength != CEPHX_AES_KEY_SIZE) &&
+      (KeyLength != CEPHX_AES256_KEY_SIZE))
+  {
     return EFI_UNSUPPORTED;
   }
 
@@ -924,7 +1003,8 @@ CephXDecodeAuthSessionKey (
   OUT UINT64       *TicketSecretId,  OPTIONAL
   OUT VOID         *TicketBlob,  OPTIONAL
   IN  UINTN        TicketBlobCapacity,
-  OUT UINTN        *TicketBlobLength  OPTIONAL
+  OUT UINTN        *TicketBlobLength  OPTIONAL,
+  OUT UINTN        *SessionKeyLength  OPTIONAL
   )
 {
   CEPH_WIRE_CURSOR  Cursor;
@@ -956,7 +1036,9 @@ CephXDecodeAuthSessionKey (
     return EFI_INVALID_PARAMETER;
   }
 
-  if (ClientSecretLength != CEPHX_AES_KEY_SIZE) {
+  if ((ClientSecretLength != CEPHX_AES_KEY_SIZE) &&
+      (ClientSecretLength != CEPHX_AES256_KEY_SIZE))
+  {
     return EFI_UNSUPPORTED;
   }
 
@@ -1069,8 +1151,14 @@ CephXDecodeAuthSessionKey (
         if (!EFI_ERROR (Status)) {
           Status = CephWireReadLe16 (&TicketCursor, &KeyLength);
         }
-        if (!EFI_ERROR (Status) && (KeyLength != CEPHX_AES_KEY_SIZE)) {
+        if (!EFI_ERROR (Status) &&
+            ((KeyLength != CEPHX_AES_KEY_SIZE) &&
+             (KeyLength != CEPHX_AES256_KEY_SIZE)))
+        {
           Status = EFI_UNSUPPORTED;
+        }
+        if (!EFI_ERROR (Status) && (KeyLength > SessionKeyCapacity)) {
+          Status = EFI_INVALID_PARAMETER;
         }
         if (!EFI_ERROR (Status)) {
           Status = CephWireReadBytes (&TicketCursor, SessionKey, KeyLength);
@@ -1093,6 +1181,9 @@ CephXDecodeAuthSessionKey (
         return Status;
       }
       Found = TRUE;
+      if (SessionKeyLength != NULL) {
+        *SessionKeyLength = KeyLength;
+      }
     }
 
     // should_encrypt_ticket + service_ticket_bl (bufferlist).
@@ -1128,7 +1219,7 @@ CephXDecodeAuthSessionKey (
 
         Status = CephXDecryptAes128Payload (
                    SessionKey,
-                   CEPHX_AES_KEY_SIZE,
+                   KeyLength,
                    Cursor.Data,
                    BlobLength,
                    TicketPlain,
@@ -1260,7 +1351,9 @@ CephXDecodeAndValidateTicket (
     return EFI_INVALID_PARAMETER;
   }
 
-  if (ServiceSecretLength != CEPHX_AES_KEY_SIZE) {
+  if ((ServiceSecretLength != CEPHX_AES_KEY_SIZE) &&
+      (ServiceSecretLength != CEPHX_AES256_KEY_SIZE))
+  {
     return EFI_UNSUPPORTED;
   }
 
@@ -1395,7 +1488,9 @@ CephXDecodeAndValidateTicket (
   }
 
   if (!EFI_ERROR (Status)) {
-    if (Info->SessionKey.KeyLength != CEPHX_AES_KEY_SIZE) {
+    if ((Info->SessionKey.KeyLength != CEPHX_AES_KEY_SIZE) &&
+        (Info->SessionKey.KeyLength != CEPHX_AES256_KEY_SIZE))
+    {
       Status = EFI_UNSUPPORTED;
     } else {
       Status = CephWireReadBytes (
@@ -1419,9 +1514,12 @@ CephXDecodeAndValidateTicket (
       Status = EFI_ACCESS_DENIED;
     } else if (AllowAll != 0) {
       Status = EFI_ACCESS_DENIED;
-    } else if ((Info->SessionKey.Type != CEPHX_CRYPTO_AES) ||
-               (Info->SessionKey.KeyLength != CEPHX_AES_KEY_SIZE))
+    } else if (!(((Info->SessionKey.Type == CEPHX_CRYPTO_AES) &&
+                 (Info->SessionKey.KeyLength == CEPHX_AES_KEY_SIZE)) ||
+                ((Info->SessionKey.Type == CEPHX_CRYPTO_AES256_KRB5) &&
+                 (Info->SessionKey.KeyLength == CEPHX_AES256_KEY_SIZE))))
     {
+      // Ceph CryptoKey type 1 is AES-128-CBC; type 2 is AES-256-CTS-HMAC384.
       Status = EFI_UNSUPPORTED;
     } else if ((Info->CreatedNanoseconds > 1000000000U) ||
                (Info->ExpiresNanoseconds > 1000000000U) ||
@@ -1481,7 +1579,9 @@ CephXVerifyAuthorizeReply (
     return EFI_INVALID_PARAMETER;
   }
 
-  if (SessionKeyLength != CEPHX_AES_KEY_SIZE) {
+  if ((SessionKeyLength != CEPHX_AES_KEY_SIZE) &&
+      (SessionKeyLength != CEPHX_AES256_KEY_SIZE))
+  {
     return EFI_UNSUPPORTED;
   }
 
@@ -1572,7 +1672,9 @@ CephXDecodeAuthorizeChallengeSecret (
     return EFI_INVALID_PARAMETER;
   }
 
-  if (SessionKeyLength != CEPHX_AES_KEY_SIZE) {
+  if ((SessionKeyLength != CEPHX_AES_KEY_SIZE) &&
+      (SessionKeyLength != CEPHX_AES256_KEY_SIZE))
+  {
     return EFI_UNSUPPORTED;
   }
 
@@ -1626,7 +1728,8 @@ CephXDecodeServiceTicket (
   OUT UINT64       *TicketSecretId,  OPTIONAL
   OUT VOID         *TicketBlob,  OPTIONAL
   IN  UINTN        TicketBlobCapacity,
-  OUT UINTN        *TicketBlobLength  OPTIONAL
+  OUT UINTN        *TicketBlobLength  OPTIONAL,
+  OUT UINTN        *ServiceSessionKeyLength  OPTIONAL
   )
 {
   CEPH_WIRE_CURSOR  Cursor;
@@ -1653,12 +1756,14 @@ CephXDecodeServiceTicket (
 
   if ((Buffer == NULL) || (PrincipalSessionKey == NULL) ||
       (ServiceSessionKey == NULL) ||
-      (ServiceSessionKeyCapacity < CEPHX_AES_KEY_SIZE))
+      (ServiceSessionKeyCapacity == 0))
   {
     return EFI_INVALID_PARAMETER;
   }
 
-  if (PrincipalSessionKeyLength != CEPHX_AES_KEY_SIZE) {
+  if ((PrincipalSessionKeyLength != CEPHX_AES_KEY_SIZE) &&
+      (PrincipalSessionKeyLength != CEPHX_AES256_KEY_SIZE))
+  {
     return EFI_UNSUPPORTED;
   }
 
@@ -1773,8 +1878,14 @@ CephXDecodeServiceTicket (
       if (!EFI_ERROR (Status)) {
         Status = CephWireReadLe16 (&TicketCursor, &KeyLength);
       }
-      if (!EFI_ERROR (Status) && (KeyLength != CEPHX_AES_KEY_SIZE)) {
+      if (!EFI_ERROR (Status) &&
+          ((KeyLength != CEPHX_AES_KEY_SIZE) &&
+           (KeyLength != CEPHX_AES256_KEY_SIZE)))
+      {
         Status = EFI_UNSUPPORTED;
+      }
+      if (!EFI_ERROR (Status) && (KeyLength > ServiceSessionKeyCapacity)) {
+        Status = EFI_INVALID_PARAMETER;
       }
       if (!EFI_ERROR (Status)) {
         Status = CephWireReadBytes (&TicketCursor, ServiceSessionKey, KeyLength);
@@ -1829,6 +1940,9 @@ CephXDecodeServiceTicket (
         *TicketSecretId = Ticket.SecretId;
       }
 
+      if (ServiceSessionKeyLength != NULL) {
+        *ServiceSessionKeyLength = KeyLength;
+      }
       Found = TRUE;
     }
 
@@ -1877,7 +1991,8 @@ CephXEncodeServiceAuthorizer (
   }
 
   if ((TicketBlobLength == 0) || (TicketBlobLength > MAX_UINT32) ||
-      (SessionKeyLength != CEPHX_AES_KEY_SIZE))
+      ((SessionKeyLength != CEPHX_AES_KEY_SIZE) &&
+       (SessionKeyLength != CEPHX_AES256_KEY_SIZE)))
   {
     return EFI_UNSUPPORTED;
   }

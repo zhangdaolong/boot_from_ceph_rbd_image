@@ -1,4 +1,5 @@
 #include <Uefi.h>
+#include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
 #include "CephRbdFormat2.h"
 

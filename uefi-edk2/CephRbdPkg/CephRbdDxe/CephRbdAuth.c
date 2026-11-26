@@ -342,7 +342,9 @@ CephRbdAuthHandshake (
     return EFI_INVALID_PARAMETER;
   }
 
-  if (SecretLength != CEPHX_AES_KEY_SIZE) {
+  if ((SecretLength != CEPHX_AES_KEY_SIZE) &&
+      (SecretLength != CEPHX_AES256_KEY_SIZE))
+  {
     return EFI_UNSUPPORTED;
   }
 
@@ -478,7 +480,8 @@ CephRbdAuthHandshake (
              &Session->AuthTicket.SecretId,
              Session->AuthTicket.Blob,
              sizeof (Session->AuthTicket.Blob),
-             &Session->AuthTicket.BlobLength
+             &Session->AuthTicket.BlobLength,
+             &Session->SessionKeyLength
              );
   Session->HasSessionKey = !EFI_ERROR (Status);
   Session->AuthTicket.Valid = !EFI_ERROR (Status);
@@ -491,6 +494,7 @@ CephRbdAuthEncodeServiceTicketRequest (
   IN  UINT64                GlobalId,
   IN  CONST CEPH_RBD_TICKET  *AuthTicket,
   IN  CONST UINT8           *SessionKey,
+  IN  UINTN                 SessionKeyLength,
   IN  UINT64                Nonce,
   IN  UINT32                ServiceMask,
   OUT VOID                  *Buffer,
@@ -525,7 +529,7 @@ CephRbdAuthEncodeServiceTicketRequest (
              AuthTicket->Blob,
              AuthTicket->BlobLength,
              SessionKey,
-             CEPHX_AES_KEY_SIZE,
+             SessionKeyLength,
              Nonce,
              FALSE,
              0,
@@ -620,6 +624,7 @@ CephRbdAuthGetServiceTicket (
              Session->GlobalId,
              &Session->AuthTicket,
              Session->SessionKey,
+             Session->SessionKeyLength,
              Nonce,
              ServiceId,
              Request,
@@ -661,14 +666,15 @@ CephRbdAuthGetServiceTicket (
              AuthReply.ResultBl,
              AuthReply.ResultBlLength,
              Session->SessionKey,
-             CEPHX_AES_KEY_SIZE,
+             Session->SessionKeyLength,
              ServiceId,
              ServiceAuth->SessionKey,
              sizeof (ServiceAuth->SessionKey),
              &ServiceAuth->Ticket.SecretId,
              ServiceAuth->Ticket.Blob,
              sizeof (ServiceAuth->Ticket.Blob),
-             &ServiceAuth->Ticket.BlobLength
+             &ServiceAuth->Ticket.BlobLength,
+             &ServiceAuth->SessionKeyLength
              );
   if (EFI_ERROR (Status)) {
     return Status;
@@ -703,7 +709,7 @@ CephRbdAuthBuildServiceAuthorizer (
            ServiceAuth->Ticket.Blob,
            ServiceAuth->Ticket.BlobLength,
            ServiceAuth->SessionKey,
-           CEPHX_AES_KEY_SIZE,
+           ServiceAuth->SessionKeyLength,
            Nonce,
            FALSE,
            0,
@@ -744,13 +750,15 @@ CephRbdAuthConnectOsd (
   Client->ClientNonce = Config->ClientNonce;
   Client->RecoveryConfig = Config;
 
-  // Open the TCP connection to the OSD messenger-v1 endpoint.
-  Status = CephRbdTcp4Connect (
+  // Open the TCP connection to the OSD messenger-v1 endpoint, honoring an
+  // explicit static/DHCP local-IP configuration when the driver supplied one.
+  Status = CephRbdTcp4ConnectEx (
              Config->ImageHandle,
              Config->ControllerHandle,
              &Config->RemoteAddress,
              Config->RemotePort,
              Config->TimeoutSeconds,
+             Config->UseExplicitLocalIp ? &Config->LocalIp : NULL,
              &Client->Connection
              );
   if (EFI_ERROR (Status)) {
@@ -815,7 +823,7 @@ CephRbdAuthConnectOsd (
 
     Status = CephXDecodeAuthorizeChallengeSecret (
                OsdAuth->SessionKey,
-               CEPHX_AES_KEY_SIZE,
+               OsdAuth->SessionKeyLength,
                Client->Negotiation.AuthorizerReply,
                Client->Negotiation.AuthorizerReplyLength,
                &ServerChallenge
@@ -833,7 +841,7 @@ CephRbdAuthConnectOsd (
                OsdAuth->Ticket.Blob,
                OsdAuth->Ticket.BlobLength,
                OsdAuth->SessionKey,
-               CEPHX_AES_KEY_SIZE,
+               OsdAuth->SessionKeyLength,
                ClientNonce,
                TRUE,
                ServerChallenge + 1,
@@ -878,7 +886,7 @@ CephRbdAuthConnectOsd (
   if (Client->Negotiation.AuthorizerReplyLength != 0) {
     Status = CephXVerifyAuthorizeReply (
                OsdAuth->SessionKey,
-               CEPHX_AES_KEY_SIZE,
+               OsdAuth->SessionKeyLength,
                Client->Negotiation.AuthorizerReply,
                Client->Negotiation.AuthorizerReplyLength,
                ClientNonce,

@@ -53,7 +53,8 @@ typedef struct {
   UINT64  GlobalId;        // Assigned global id from MAuthReply.
   UINT64  ServerChallenge; // Challenge used in the final authenticate step.
   UINT64  ClientChallenge; // Our nonce.
-  UINT8   SessionKey[CEPHX_AES_KEY_SIZE]; // AUTH ticket session key (AES-128).
+  UINT8   SessionKey[CEPHX_MAX_KEY_SIZE]; // AUTH ticket session key.
+  UINTN   SessionKeyLength;               // 16 (AES-128) or 32 (AES-256-KRB5).
   BOOLEAN HasSessionKey;
   CEPH_RBD_TICKET  AuthTicket;  // AUTH ticket for building service authorizers.
 } CEPH_RBD_AUTH_SESSION;
@@ -122,7 +123,8 @@ CephRbdAuthHandshake (
 // SessionKey is the service session key recovered with the AUTH session key.
 typedef struct {
   CEPH_RBD_TICKET  Ticket;
-  UINT8            SessionKey[CEPHX_AES_KEY_SIZE];
+  UINT8            SessionKey[CEPHX_MAX_KEY_SIZE];
+  UINTN            SessionKeyLength;
   UINT64           GlobalId;
   UINT32           ServiceId;
   BOOLEAN          Valid;
@@ -136,6 +138,7 @@ CephRbdAuthEncodeServiceTicketRequest (
   IN  UINT64               GlobalId,
   IN  CONST CEPH_RBD_TICKET  *AuthTicket,
   IN  CONST UINT8          *SessionKey,
+  IN  UINTN                SessionKeyLength,
   IN  UINT64               Nonce,
   IN  UINT32               ServiceMask,
   OUT VOID                 *Buffer,

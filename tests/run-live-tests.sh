@@ -21,6 +21,7 @@ cc -std=c11 -Wall -Wextra \
   "$dxe/CephRbdPlacement.c" \
   "$dxe/CephRbdMessenger.c" \
   "$dxe/CephRbdCephX.c" \
+  "$dxe/CephRbdCephXAes256.c" \
   "$dxe/CephRbdMsgrV1Handshake.c" \
   "$dxe/CephRbdMsgrV1Transport.c" \
   "$dxe/CephRbdMsgrV1Session.c" \

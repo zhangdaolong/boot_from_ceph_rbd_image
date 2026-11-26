@@ -167,12 +167,13 @@ CephRbdTcp4RecordCleanupError (
 }
 
 EFI_STATUS
-CephRbdTcp4Connect (
+CephRbdTcp4ConnectEx (
   IN EFI_HANDLE                 ImageHandle,
   IN EFI_HANDLE                 ControllerHandle,
   IN CONST EFI_IPv4_ADDRESS     *RemoteAddress,
   IN UINT16                     RemotePort,
   IN UINT32                     TimeoutSeconds,
+  IN CONST CEPH_RBD_LOCAL_IP_CONFIG  *LocalIp OPTIONAL,
   OUT CEPH_RBD_TCP4_CONNECTION *Connection
   )
 {
@@ -236,7 +237,23 @@ CephRbdTcp4Connect (
   }
 
   ZeroMem (&Config, sizeof (Config));
-  Config.AccessPoint.UseDefaultAddress = TRUE;
+  if (LocalIp == NULL) {
+    Config.AccessPoint.UseDefaultAddress = TRUE;
+  } else {
+    Config.AccessPoint.UseDefaultAddress = LocalIp->UseDefaultAddress;
+    if (!LocalIp->UseDefaultAddress) {
+      CopyMem (
+        &Config.AccessPoint.StationAddress,
+        &LocalIp->StationAddress,
+        sizeof (EFI_IPv4_ADDRESS)
+        );
+      CopyMem (
+        &Config.AccessPoint.SubnetMask,
+        &LocalIp->SubnetMask,
+        sizeof (EFI_IPv4_ADDRESS)
+        );
+    }
+  }
   CopyMem (
     &Config.AccessPoint.RemoteAddress,
     RemoteAddress,
@@ -286,6 +303,27 @@ Error:
   }
 
   return Status;
+}
+
+EFI_STATUS
+CephRbdTcp4Connect (
+  IN EFI_HANDLE                 ImageHandle,
+  IN EFI_HANDLE                 ControllerHandle,
+  IN CONST EFI_IPv4_ADDRESS     *RemoteAddress,
+  IN UINT16                     RemotePort,
+  IN UINT32                     TimeoutSeconds,
+  OUT CEPH_RBD_TCP4_CONNECTION *Connection
+  )
+{
+  return CephRbdTcp4ConnectEx (
+           ImageHandle,
+           ControllerHandle,
+           RemoteAddress,
+           RemotePort,
+           TimeoutSeconds,
+           NULL,
+           Connection
+           );
 }
 
 EFI_STATUS

@@ -85,13 +85,27 @@ against a real Ceph 22 cluster (see B.5):
   (`gpt_esp: status=0 esp_lba=6144-8192`) while a non-GPT image is rejected
   (`status=-4`). Long read sequences are safe: lossy OSD sessions skip
   retransmit tracking and short sparse reads are zero-filled like librbd.
+- A real EDK II build: `bash scripts/build-edk2.sh` produces `CephRbdDxe.efi`
+  (PE32+ EFI boot service driver) from `CephRbdPkg.dsc` with GCC5.
+- GPT/ESP → UEFI Boot Manager handoff (`CephRbdBootManager.c`): builds an
+  HD(GPT)+FilePath device path for the ESP, installs a `Boot####` load option
+  and registers it in `BootOrder`, with an optional immediate
+  `LoadImage`/`StartImage` of the loader.
+- DHCP/static local IPv4 configuration (`CephRbdNetwork.c`): by default the
+  platform (OVMF) DHCP auto-config is used; a `CephRbdNetworkConfig` UEFI
+  variable can supply a static station address/subnet mask.
+- `KEY_REFERENCE` credentials resolved through a platform secret resolver
+  (`CephRbdSecretResolver.c`) backed by a protected UEFI variable, and
+  CephX AES-256-KRB5 (AES-256-CBC-CTS CS3 + HMAC-SHA384[0..23]) support.
+- Legacy BIOS PXE/UNDI (`!PXE` ROM discovery and raw Ethernet frame I/O) in
+  `bios/stage2/pxe_undi.c`.
 
-The following are **still missing**, so this path cannot boot a VM yet:
+The following is **still missing**, so guest-level boot is not yet validated:
 
-- UEFI Boot Manager integration (handing the discovered ESP/loader to the boot
-  manager).
-- An actual EDK II / OVMF build of the driver, and end-to-end boot validation.
-- DHCP / static network configuration inside the guest firmware.
+- End-to-end OVMF guest boot from a Ceph RBD image (host/live tests and the
+  EDK II build pass, but an actual guest has not been booted from RBD on the
+  test cluster). Full ARP/IP/DHCP + Ceph socket transport over BIOS UNDI, and
+  AES-256 live cluster validation, are also outstanding.
 
 See [`IMPLEMENTATION_STATUS.md`](../uefi-edk2/IMPLEMENTATION_STATUS.md) for the
 per-area table and [`firmware-rbd-protocol.md`](firmware-rbd-protocol.md) for the
@@ -108,10 +122,15 @@ scripts/build-edk2.sh <EDK2_WORKSPACE> <PACKAGES_PATH>
 python3 scripts/make-ceph-rbd-config.py \
     config/ceph-rbd-example.ini CephRbdConfig.bin
 
-# 3. Install the blob as a UEFI variable, and put CephRbdDxe.efi in the OVMF
+# 3. (Optional) Generate a static-network blob. Skip this to use platform DHCP.
+python3 scripts/make-ceph-rbd-network-config.py static CephRbdNetworkConfig.bin \
+    --station 192.168.122.50 --mask 255.255.255.0 --gateway 192.168.122.1
+
+# 4. Install the blob(s) as UEFI variables, and put CephRbdDxe.efi in the OVMF
 #    firmware volume or load it from an ESP. From a UEFI shell:
 #      fs0:> load CephRbdDxe.efi
 #      fs0:> setvar CephRbdConfig -guid 9E5F1A2B-3C4D-4E5F-8A9B-0C1D2E3F4A5B -bs CephRbdConfig.bin
+#      fs0:> setvar CephRbdNetworkConfig -guid A7E4C1B2-3D5F-4E68-9B12-770A44632EF1 -bs CephRbdNetworkConfig.bin
 ```
 
 Template for `config/ceph-rbd-example.ini` (the generated blob is 372 bytes,
@@ -125,8 +144,14 @@ pool = 4
 image = verifyimg
 client-id = firmware01
 key-hex = 42bf0d364befdff7d95e2c3058f2729c
-# 0x2 makes the DXE entry point map the image without a controller binding.
-flags = 2
+# flags is a bitmask:
+#   0x1 KEY_REFERENCE  - Key holds an opaque reference resolved via the
+#                        platform secret resolver (protected UEFI variable).
+#   0x2 START_ON_ENTRY - map the image directly from the DXE entry point.
+#   0x4 BOOT_MANAGER   - discover GPT/ESP and install a Boot#### load option.
+#   0x8 TRY_BOOT       - with BOOT_MANAGER, LoadImage/StartImage immediately.
+# Combine as needed, e.g. flags = 6 (START_ON_ENTRY | BOOT_MANAGER).
+flags = 6
 ```
 
 - Monitor endpoints **must be v1-enabled**. The v2-only default port `3300`
@@ -135,12 +160,14 @@ flags = 2
 - Exactly one of `key-hex` or `key-source` must be set:
   - `key-hex` is a raw 16-byte AES-128 secret (32 hex digits), consumed
     directly by the CephX handshake. This clears the `KEY_REFERENCE` flag.
-  - `key-source` is an opaque reference to protected firmware storage, which
-    sets the `KEY_REFERENCE` flag. Resolving it needs a platform-specific
-    credential provider that this generic driver does not include, so a config
-    using `key-source` returns `EFI_UNSUPPORTED` at driver start.
-- The secret must belong to a Ceph identity whose key type is `aes` (AES-128).
-  Ceph's AES256-KRB5 keys are not supported by this firmware subset:
+  - `key-source` is an opaque reference string. It sets the `KEY_REFERENCE`
+    flag and is resolved at driver start through `CephRbdSecretResolver.c`:
+    the string names a UEFI variable under GUID
+    `6F3D9C1A-7B52-4E08-A1C3-C35E7209A48B` whose data is the raw key bytes
+    (16 for AES-128, 32 for AES-256-KRB5). Firmware can back that variable with
+    an authenticated variable or a TPM-sealed store.
+- The secret must belong to a Ceph identity whose key type is `aes` (AES-128)
+  or `aes256` (AES-256-KRB5, `CEPH_CRYPTO_AES256KRB5`):
   ```bash
   ceph-authtool --gen-print-key --key-type=aes
   ```

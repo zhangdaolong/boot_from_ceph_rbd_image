@@ -182,14 +182,14 @@ TestGpt (void)
   // Find the ESP with and without an array CRC.
   ArrayCrc = CephRbdGptCrc32 (Table, TableLength);
   assert(CephRbdGptFindEspInTable (
-           Table, TableLength, &Header, ArrayCrc, EspPtr) == EFI_SUCCESS);
+           Table, TableLength, &Header, ArrayCrc, EspPtr, NULL) == EFI_SUCCESS);
   assert(Esp.FirstLba == 31);
   assert(CephRbdGptFindEspInTable (
-           Table, TableLength, &Header, 0, EspPtr) == EFI_SUCCESS);
+           Table, TableLength, &Header, 0, EspPtr, NULL) == EFI_SUCCESS);
   assert(CephRbdGptFindEspInTable (
-           Table, TableLength, &Header, ArrayCrc ^ 1, EspPtr) == EFI_CRC_ERROR);
+           Table, TableLength, &Header, ArrayCrc ^ 1, EspPtr, NULL) == EFI_CRC_ERROR);
   assert(CephRbdGptFindEspInTable (
-           Table, 16, &Header, ArrayCrc, EspPtr) == EFI_BUFFER_TOO_SMALL);
+           Table, 16, &Header, ArrayCrc, EspPtr, NULL) == EFI_BUFFER_TOO_SMALL);
 
   // No ESP in the table.
   {
@@ -197,15 +197,15 @@ TestGpt (void)
     memcpy (NoEsp, Table, TableLength);
     memset (NoEsp + CEPH_RBD_GPT_PARTITION_ENTRY_SIZE, 0, 16);
     assert(CephRbdGptFindEspInTable (
-             NoEsp, TableLength, &Header, 0, EspPtr) == EFI_NOT_FOUND);
+             NoEsp, TableLength, &Header, 0, EspPtr, NULL) == EFI_NOT_FOUND);
   }
 
   // High-level discovery through the callback.
   assert(CephRbdGptDiscoverEsp (
-           MockReadLba, &Disk, MOCK_SECTORS - 1, EspPtr) == EFI_SUCCESS);
+           MockReadLba, &Disk, MOCK_SECTORS - 1, EspPtr, NULL) == EFI_SUCCESS);
   assert(Esp.FirstLba == 31 && Esp.LastLba == 63);
   assert(CephRbdGptDiscoverEsp (
-           MockReadLba, &Disk, 1, EspPtr) == EFI_INVALID_PARAMETER);
+           MockReadLba, &Disk, 1, EspPtr, NULL) == EFI_INVALID_PARAMETER);
 
   // Boot path.
   assert(CephRbdGptBuildEspBootPath (Path, sizeof (Path) / sizeof (Path[0])) ==

@@ -22,6 +22,13 @@
 // flag the driver only publishes its Driver Binding protocol and waits for
 // the UEFI driver model to select a controller.
 #define CEPH_RBD_CONFIG_FLAG_START_ON_ENTRY 0x00000002U
+// After the BlockIo device is published, discover the GPT/ESP on the image
+// and register a UEFI Boot#### load option for \EFI\BOOT\BOOTX64.EFI.
+#define CEPH_RBD_CONFIG_FLAG_BOOT_MANAGER  0x00000004U
+// When combined with CEPH_RBD_CONFIG_FLAG_BOOT_MANAGER, immediately
+// LoadImage()/StartImage() the discovered loader instead of waiting for the
+// normal UEFI Boot Manager to consume BootOrder on the next reset.
+#define CEPH_RBD_CONFIG_FLAG_TRY_BOOT      0x00000008U
 
 typedef struct {
   EFI_IPv4_ADDRESS  Address;

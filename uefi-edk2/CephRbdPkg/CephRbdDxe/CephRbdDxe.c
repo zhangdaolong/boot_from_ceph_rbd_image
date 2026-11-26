@@ -2,12 +2,17 @@
 #include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
 #include <Library/UefiBootServicesTableLib.h>
+#include <Library/UefiRuntimeServicesTableLib.h>
 #include <Protocol/BlockIo.h>
 #include <Protocol/DriverBinding.h>
 #include "CephRbdAuth.h"
 #include "CephRbdBlockIo.h"
+#include "CephRbdBootManager.h"
 #include "CephRbdConfig.h"
 #include "CephRbdDxe.h"
+#include "CephRbdGpt.h"
+#include "CephRbdNetwork.h"
+#include "CephRbdSecretResolver.h"
 #include "CephRbdMsgrV1Recovery.h"
 #include "CephRbdOsdClient.h"
 
@@ -383,6 +388,112 @@ CephRbdDriverBindingSupported (
   return EFI_SUCCESS;
 }
 
+// The EFI-backed Boot Manager handoff is only compiled for real firmware.
+// Host core tests exercise CephRbdBootManager.c separately with mocks, and the
+// host stubs do not declare gBS->LoadImage/gRT->SetVariable.
+#ifndef CEPH_RBD_CONFIG_HOST_TEST
+
+// Adapter that lets the GPT parser read LBAs through the mapped BlockIo
+// device. The driver has already authenticated an OSD session, so these reads
+// reuse the driver's OSD client pool rather than opening new connections.
+typedef struct {
+  CEPH_RBD_OSD_CLIENT_POOL  *Pool;
+  CEPH_RBD_BLOCK_DEVICE     *Device;
+} CEPH_RBD_DXE_GPT_CONTEXT;
+
+STATIC
+EFI_STATUS
+CephRbdDxeReadLba (
+  IN     VOID   *Context,
+  IN     UINT64  Lba,
+  OUT    UINT8  *Buffer,
+  IN     UINTN   BufferSize
+  )
+{
+  CEPH_RBD_DXE_GPT_CONTEXT  *Ctx;
+
+  if ((Context == NULL) || (Buffer == NULL) ||
+      ((BufferSize % CEPH_RBD_BLOCK_SIZE) != 0))
+  {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  Ctx = (CEPH_RBD_DXE_GPT_CONTEXT *)Context;
+  return CephRbdBlockIoReadBlocks (
+           Ctx->Pool, Ctx->Device, Lba,
+           BufferSize / CEPH_RBD_BLOCK_SIZE, Buffer, BufferSize
+           );
+}
+
+// Discover the ESP on the freshly mapped image and register a Boot#### load
+// option for its x64 fallback loader. When TryBoot is TRUE the loader is also
+// handed to LoadImage()/StartImage() immediately. Failure to find an ESP or
+// install the option is non-fatal: the BlockIo device remains published.
+STATIC
+EFI_STATUS
+CephRbdDxeBootstrapHandoff (
+  IN OUT CEPH_RBD_DRIVER  *Driver,
+  IN     EFI_HANDLE        ParentImageHandle,
+  IN     BOOLEAN           TryBoot
+  )
+{
+  EFI_STATUS                     Status;
+  CEPH_RBD_DXE_GPT_CONTEXT       GptCtx;
+  CEPH_RBD_GPT_PARTITION         Esp;
+  CEPH_RBD_BOOT_MANAGER_BACKEND  Backend;
+  UINT64                         LastLba;
+  UINT32                         PartitionNumber;
+  UINT16                         BootIndex;
+
+  if ((Driver == NULL) || (Driver->State != CephRbdStateDeviceReady)) {
+    return EFI_NOT_READY;
+  }
+
+  Status = CephRbdBlockIoGetMediaLastLba (&Driver->Device, &LastLba);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  GptCtx.Pool = &Driver->OsdPool;
+  GptCtx.Device = &Driver->Device;
+  Status = CephRbdGptDiscoverEsp (
+             CephRbdDxeReadLba, &GptCtx, LastLba, &Esp, &PartitionNumber
+             );
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_WARN,
+            "CephRbdDxe: ESP discovery failed with %d (non-fatal)\n",
+            (INT32)Status
+            ));
+    return Status;
+  }
+
+  Status = CephRbdBootManagerGetEfiBackend (&Backend);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephRbdBootManagerHandoff (
+             &Backend,
+             &Esp,
+             PartitionNumber,
+             CEPH_RBD_BM_AUTO_BOOT_INDEX,
+             TryBoot,
+             ParentImageHandle,
+             &BootIndex
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  DEBUG ((DEBUG_INFO,
+          "CephRbdDxe: registered Boot%04x for Ceph RBD ESP (partition %u)\n",
+          BootIndex, PartitionNumber
+          ));
+  return EFI_SUCCESS;
+}
+
+#endif  // !CEPH_RBD_CONFIG_HOST_TEST
+
 STATIC EFI_STATUS EFIAPI
 CephRbdDriverBindingStart (
   IN EFI_DRIVER_BINDING_PROTOCOL  *This,
@@ -391,7 +502,15 @@ CephRbdDriverBindingStart (
   )
 {
   CEPH_RBD_CONFIG                  Config;
+  CEPH_RBD_NETWORK_CONFIG          NetworkConfig;
+  CEPH_RBD_LOCAL_IP_CONFIG         LocalIp;
   CEPH_RBD_MSGR_V1_CONNECT_CONFIG  ConnectConfig;
+#ifndef CEPH_RBD_CONFIG_HOST_TEST
+  UINT8                            ResolvedKey[CEPHX_MAX_KEY_SIZE];
+  UINTN                            ResolvedKeyLength;
+#endif
+  CONST UINT8                      *Secret;
+  UINTN                            SecretLength;
   EFI_STATUS                       Status;
   UINTN                            Index;
 
@@ -403,6 +522,56 @@ CephRbdDriverBindingStart (
   Status = CephRbdConfigLoad (&Config);
   if (EFI_ERROR (Status)) {
     return Status;
+  }
+
+  // Resolve the local IPv4 configuration. An absent or DHCP-mode variable
+  // resolves UseDefaultAddress TRUE so the TCP4 layer uses platform DHCP.
+  ZeroMem (&NetworkConfig, sizeof (NetworkConfig));
+  if (EFI_ERROR (CephRbdNetworkLoad (&NetworkConfig))) {
+    Status = CephRbdNetworkResolveLocalIp (NULL, &LocalIp);
+  } else {
+    Status = CephRbdNetworkResolveLocalIp (&NetworkConfig, &LocalIp);
+  }
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  // Resolve the CephX secret. Raw key bytes are used directly; a KEY_REFERENCE
+  // is passed through the platform secret resolver to obtain the raw key.
+  if ((Config.Flags & CEPH_RBD_CONFIG_FLAG_KEY_REFERENCE) != 0) {
+#ifndef CEPH_RBD_CONFIG_HOST_TEST
+    CEPH_RBD_SECRET_RESOLVER_BACKEND  Resolver;
+
+    Status = CephRbdSecretResolverGetEfiBackend (&Resolver);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+    Status = CephRbdSecretResolve (
+               &Resolver,
+               (CONST CHAR8 *)Config.Key,
+               Config.KeyLength,
+               ResolvedKey,
+               sizeof (ResolvedKey),
+               &ResolvedKeyLength
+               );
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_ERROR,
+              "CephRbdDxe: failed to resolve key reference with %d\n",
+              (INT32)Status
+              ));
+      return Status;
+    }
+    Secret = ResolvedKey;
+    SecretLength = ResolvedKeyLength;
+#else
+    // Host tests do not exercise the firmware-only resolver; reject here.
+    DEBUG ((DEBUG_ERROR,
+            "CephRbdDxe: key references need a platform secret resolver\n"));
+    return EFI_UNSUPPORTED;
+#endif
+  } else {
+    Secret = Config.Key;
+    SecretLength = Config.KeyLength;
   }
 
   // Try every configured monitor before giving up. This is simple failover:
@@ -420,16 +589,12 @@ CephRbdDriverBindingStart (
     ConnectConfig.AuthorizerProtocol = 0;
     ConnectConfig.Flags = 0;
     ConnectConfig.TimeoutSeconds = 5;
-
-    // CephRbdAuthHandshake needs the raw 16-byte AES-128 secret. The config
-    // Key field carries raw key bytes unless the KEY_REFERENCE flag is set,
-    // in which case resolving it requires platform-specific protected storage
-    // that a generic DXE driver cannot provide.
-    if ((Config.Flags & CEPH_RBD_CONFIG_FLAG_KEY_REFERENCE) != 0) {
-      DEBUG ((DEBUG_ERROR,
-              "CephRbdDxe: key references are not supported by this driver\n"));
-      return EFI_UNSUPPORTED;
-    }
+    ConnectConfig.UseExplicitLocalIp = TRUE;
+    CopyMem (
+      &ConnectConfig.LocalIp,
+      &LocalIp,
+      sizeof (LocalIp)
+      );
 
     Status = CephRbdDriverInitialize (
                &mCephRbdDriver,
@@ -441,10 +606,30 @@ CephRbdDriverBindingStart (
                Config.Fsid,
                Config.Identity,
                Config.IdentityLength,
-               Config.Key,
-               Config.KeyLength
+               Secret,
+               SecretLength
                );
     if (!EFI_ERROR (Status)) {
+      // With the BlockIo device published, optionally drive the GPT/ESP ->
+      // UEFI Boot Manager handoff. This is intentionally best-effort: the
+      // mapped read-only disk is still useful without an ESP.
+#ifndef CEPH_RBD_CONFIG_HOST_TEST
+      if ((Config.Flags & CEPH_RBD_CONFIG_FLAG_BOOT_MANAGER) != 0) {
+        EFI_STATUS  HandoffStatus;
+
+        HandoffStatus = CephRbdDxeBootstrapHandoff (
+                          &mCephRbdDriver,
+                          This->ImageHandle,
+                          (Config.Flags & CEPH_RBD_CONFIG_FLAG_TRY_BOOT) != 0
+                          );
+        if (EFI_ERROR (HandoffStatus)) {
+          DEBUG ((DEBUG_WARN,
+                  "CephRbdDxe: boot manager handoff failed with %d\n",
+                  (INT32)HandoffStatus
+                  ));
+        }
+      }
+#endif
       return EFI_SUCCESS;
     }
 

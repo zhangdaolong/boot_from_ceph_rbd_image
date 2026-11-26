@@ -12,8 +12,11 @@
 #define CEPH_RBD_GPT_SECTOR_SIZE              512
 #define CEPH_RBD_GPT_HEADER_SIZE              92
 #define CEPH_RBD_GPT_PARTITION_ENTRY_SIZE     128
-#define CEPH_RBD_GPT_SIGNATURE_PART           UINT64_C(0x5452415020494645)  // "EFI PART"
-#define CEPH_RBD_GPT_REVISION                 UINT32_C(0x00010000)
+// EDK II's INT64/UINT64 type headers do not define the C99 UINT64_C/UINT32_C
+// macros, so use plain suffixed literals that both the firmware build and the
+// host tests accept.
+#define CEPH_RBD_GPT_SIGNATURE_PART           0x5452415020494645ULL  // "EFI PART"
+#define CEPH_RBD_GPT_REVISION                 0x00010000U
 #define CEPH_RBD_GPT_MAX_PARTITION_ENTRIES    4096
 #define CEPH_RBD_GPT_MAX_PARTITION_NAME_LEN   36  // CHAR16 count, 72 bytes
 
@@ -96,14 +99,16 @@ CephRbdGptIsEsp (
   );
 
 // Scan a raw partition entry array for the ESP. Validates the array CRC when
-// the caller supplies the CRC recorded in the GPT header.
+// the caller supplies the CRC recorded in the GPT header. When PartitionNumber
+// is non-NULL it receives the 1-based GPT partition number of the ESP.
 EFI_STATUS
 CephRbdGptFindEspInTable (
   IN CONST UINT8                  *Table,
   IN UINTN                        TableLength,
   IN CONST CEPH_RBD_GPT_HEADER    *Header,
   IN UINT32                       ExpectedCrc,
-  OUT CEPH_RBD_GPT_PARTITION      *Esp
+  OUT CEPH_RBD_GPT_PARTITION      *Esp,
+  OUT OPTIONAL UINT32             *PartitionNumber
   );
 
 // High-level discovery: read LBA 0/1 and the partition array through ReadLba,
@@ -111,10 +116,11 @@ CephRbdGptFindEspInTable (
 // is used only to bound the reads.
 EFI_STATUS
 CephRbdGptDiscoverEsp (
-  IN     CEPH_RBD_GPT_READ_LBA   ReadLba,
-  IN     VOID                   *Context,
-  IN     UINT64                 LastLba,
-  OUT    CEPH_RBD_GPT_PARTITION *Esp
+  IN     CEPH_RBD_GPT_READ_LBA    ReadLba,
+  IN     VOID                    *Context,
+  IN     UINT64                  LastLba,
+  OUT    CEPH_RBD_GPT_PARTITION  *Esp,
+  OUT OPTIONAL UINT32            *PartitionNumber
   );
 
 // Build the standard removable-media boot path for x64: \EFI\BOOT\BOOTX64.EFI.

@@ -24,6 +24,8 @@
   CephRbdTcp4.c
   CephRbdTcp4.h
   CephRbdCephX.c
+  CephRbdCephXAes256.c
+  CephRbdCephXAes256.h
   CephRbdCephX.h
   CephRbdMsgrV1Recovery.c
   CephRbdMsgrV1Recovery.h
@@ -38,6 +40,8 @@
   CephRbdPlacement.h
   CephRbdBlockIo.c
   CephRbdBlockIo.h
+  CephRbdBootManager.c
+  CephRbdBootManager.h
   CephRbdOsdClient.c
   CephRbdOsdClient.h
   CephRbdLayout.c
@@ -46,11 +50,16 @@
   CephRbdFormat2.h
   CephRbdGpt.c
   CephRbdGpt.h
+  CephRbdNetwork.c
+  CephRbdNetwork.h
+  CephRbdSecretResolver.c
+  CephRbdSecretResolver.h
 
 [Packages]
   MdePkg/MdePkg.dec
   MdeModulePkg/MdeModulePkg.dec
   CryptoPkg/CryptoPkg.dec
+  CephRbdPkg/CephRbdPkg.dec
 
 [LibraryClasses]
   BaseLib
@@ -72,6 +81,8 @@
 
 [Guids]
   gCephRbdConfigGuid
+  gCephRbdNetworkGuid
+  gCephRbdSecretGuid
 
 [Depex]
   TRUE

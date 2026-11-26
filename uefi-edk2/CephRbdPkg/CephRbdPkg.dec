@@ -7,3 +7,7 @@
 [Guids]
   ## Firmware configuration blob variable GUID
   gCephRbdConfigGuid            = 9E5F1A2B-3C4D-4E5F-8A9B-0C1D2E3F4A5B
+  ## Local network configuration blob variable GUID
+  gCephRbdNetworkGuid           = {0xA7E4C1B2, 0x3D5F, 0x4E68, {0x9B, 0x12, 0x77, 0x0A, 0x44, 0x63, 0x2E, 0xF1}}
+  ## Protected secret (key reference) variable GUID
+  gCephRbdSecretGuid            = {0x6F3D9C1A, 0x7B52, 0x4E08, {0xA1, 0xC3, 0x5E, 0x72, 0x09, 0xA4, 0xD6, 0x8B}}

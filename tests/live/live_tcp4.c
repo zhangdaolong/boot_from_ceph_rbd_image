@@ -99,6 +99,26 @@ CephRbdTcp4Connect (
   return EFI_SUCCESS;
 }
 
+// The host probe relies on the OS network stack for the local station address,
+// so the explicit local-IP configuration is accepted but ignored here.
+EFI_STATUS
+CephRbdTcp4ConnectEx (
+  IN EFI_HANDLE                         ImageHandle,
+  IN EFI_HANDLE                         ControllerHandle,
+  IN CONST EFI_IPv4_ADDRESS             *RemoteAddress,
+  IN UINT16                             RemotePort,
+  IN UINT32                             TimeoutSeconds,
+  IN CONST CEPH_RBD_LOCAL_IP_CONFIG     *LocalIp OPTIONAL,
+  OUT CEPH_RBD_TCP4_CONNECTION           *Connection
+  )
+{
+  (VOID)LocalIp;
+  return CephRbdTcp4Connect (
+           ImageHandle, ControllerHandle, RemoteAddress, RemotePort,
+           TimeoutSeconds, Connection
+           );
+}
+
 EFI_STATUS
 CephRbdTcp4Send (
   IN CEPH_RBD_TCP4_CONNECTION  *Connection,

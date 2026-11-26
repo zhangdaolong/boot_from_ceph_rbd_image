@@ -4,6 +4,7 @@
 #include <Uefi.h>
 #include <Protocol/ServiceBinding.h>
 #include <Protocol/Tcp4.h>
+#include "CephRbdNetwork.h"
 
 typedef struct {
   EFI_SERVICE_BINDING_PROTOCOL  *ServiceBinding;
@@ -17,6 +18,7 @@ typedef struct {
   BOOLEAN                       Connected;
 } CEPH_RBD_TCP4_CONNECTION;
 
+// Connect using the platform default (DHCP) station address.
 EFI_STATUS
 CephRbdTcp4Connect (
   IN EFI_HANDLE                         ImageHandle,
@@ -24,6 +26,19 @@ CephRbdTcp4Connect (
   IN CONST EFI_IPv4_ADDRESS             *RemoteAddress,
   IN UINT16                             RemotePort,
   IN UINT32                             TimeoutSeconds,
+  OUT CEPH_RBD_TCP4_CONNECTION         *Connection
+  );
+
+// Connect using an explicit resolved local-IP configuration. LocalIp == NULL
+// is equivalent to CephRbdTcp4Connect() (platform default / DHCP).
+EFI_STATUS
+CephRbdTcp4ConnectEx (
+  IN EFI_HANDLE                         ImageHandle,
+  IN EFI_HANDLE                         ControllerHandle,
+  IN CONST EFI_IPv4_ADDRESS             *RemoteAddress,
+  IN UINT16                             RemotePort,
+  IN UINT32                             TimeoutSeconds,
+  IN CONST CEPH_RBD_LOCAL_IP_CONFIG     *LocalIp OPTIONAL,
   OUT CEPH_RBD_TCP4_CONNECTION         *Connection
   );
 
