@@ -81,7 +81,7 @@ TestMediaLastLba (VOID)
   assert(CephRbdBlockIoGetMediaLastLba (&Device, &LastLba) == EFI_SUCCESS);
   assert(LastLba == ((1ULL << 20) / CEPH_RBD_BLOCK_SIZE) - 1);
 
-  // Bounds checking in ReadBlocks.
+  // Bounds checking in ReadBlocks (no OSD session pool supplied).
   assert(CephRbdBlockIoReadBlocks (
            NULL, &Device, 0, 1, NULL, CEPH_RBD_BLOCK_SIZE) ==
          EFI_INVALID_PARAMETER);

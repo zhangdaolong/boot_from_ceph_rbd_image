@@ -223,33 +223,37 @@ CephRbdBlockIoDecodeString (
 STATIC
 EFI_STATUS
 CephRbdBlockIoCallClassMethod (
-  IN OUT CEPH_RBD_MSGR_V1_CLIENT  *Client,
-  IN UINT32                       PoolId,
-  IN UINT32                       OsdEpoch,
-  IN CONST CHAR8                  *ObjectName,
-  IN UINTN                        ObjectNameLength,
-  IN CONST CHAR8                  *ClassName,
-  IN CONST CHAR8                  *MethodName,
-  IN CONST VOID                   *Indata  OPTIONAL,
-  IN UINTN                        IndataLength,
-  OUT UINT8                       *OutData,
-  IN UINTN                        OutDataCapacity,
-  OUT UINTN                       *OutDataLength
+  IN     CEPH_RBD_OSD_CLIENT_POOL  *OsdPool,
+  IN     CONST CEPH_RBD_PLACEMENT  *Placement,
+  IN     UINT32                    PoolId,
+  IN     UINT32                    OsdEpoch,
+  IN     CONST CHAR8               *ObjectName,
+  IN     UINTN                     ObjectNameLength,
+  IN     CONST CHAR8               *ClassName,
+  IN     CONST CHAR8               *MethodName,
+  IN     CONST VOID                *Indata  OPTIONAL,
+  IN     UINTN                     IndataLength,
+  OUT    UINT8                     *OutData,
+  IN     UINTN                     OutDataCapacity,
+  OUT    UINTN                     *OutDataLength
   )
 {
-  EFI_STATUS          Status;
-  CEPH_OSD_OP_REQUEST Op;
-  UINT8               Request[CEPH_RPC_MAX_METADATA];
-  UINT8               ReplyFront[CEPH_RPC_MAX_METADATA];
-  UINT8               ReplyData[CEPH_RPC_MAX_METADATA];
-  UINTN               RequestLength;
-  UINTN               ReplyFrontLength;
-  UINTN               ReplyDataLength;
-  UINTN               ClassNameLength;
-  UINTN               MethodNameLength;
-  CEPH_OSD_OP_REPLY   Reply;
+  EFI_STATUS                   Status;
+  CEPH_OSD_OP_REQUEST          Op;
+  CEPH_RBD_MSGR_V1_CLIENT     *OsdClient;
+  INT32                        OsdIds[CEPH_RBD_CRUSH_MAX_RESULT];
+  UINTN                        OsdCount;
+  UINT8                        Request[CEPH_RPC_MAX_METADATA];
+  UINT8                        ReplyFront[CEPH_RPC_MAX_METADATA];
+  UINT8                        ReplyData[CEPH_RPC_MAX_METADATA];
+  UINTN                        RequestLength;
+  UINTN                        ReplyFrontLength;
+  UINTN                        ReplyDataLength;
+  UINTN                        ClassNameLength;
+  UINTN                        MethodNameLength;
+  CEPH_OSD_OP_REPLY            Reply;
 
-  if ((Client == NULL) || (ObjectName == NULL) ||
+  if ((OsdPool == NULL) || (Placement == NULL) || (ObjectName == NULL) ||
       (ObjectNameLength == 0) || (ClassName == NULL) ||
       (MethodName == NULL) || (OutData == NULL) ||
       (OutDataLength == NULL) ||
@@ -279,6 +283,24 @@ CephRbdBlockIoCallClassMethod (
     return EFI_INVALID_PARAMETER;
   }
 
+  // Class-method ops are OSD ops: route them to the object's primary OSD
+  // over an authenticated session, never over the monitor connection.
+  Status = CephRbdPlacementMapObject (
+             Placement, ObjectName, ObjectNameLength,
+             NULL, NULL, OsdIds, CEPH_RBD_CRUSH_MAX_RESULT, &OsdCount
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  if (OsdCount == 0) {
+    return EFI_NOT_FOUND;
+  }
+
+  Status = CephRbdOsdClientPoolGet (OsdPool, Placement, OsdIds[0], &OsdClient);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
   ZeroMem (&Op, sizeof (Op));
   Op.Op = CEPH_OSD_OP_CALL;
   Op.Flags = CEPH_OSD_FLAG_READ;
@@ -293,7 +315,7 @@ CephRbdBlockIoCallClassMethod (
              PoolId,
              1,
              OsdEpoch,
-             Client->Session.NextOutgoingSequence,
+             OsdClient->Session.NextOutgoingSequence,
              ObjectName,
              ObjectNameLength,
              &Op,
@@ -306,8 +328,10 @@ CephRbdBlockIoCallClassMethod (
     return Status;
   }
 
-  Status = CephRpcCallAuto (
-             Client,
+  // CephRpcCallAuto's generic reconnect path has no OSD service ticket; use
+  // the already-authenticated OSD session directly and invalidate it on error.
+  Status = CephRpcCall (
+             OsdClient,
              CEPH_MSG_OSD_OP,
              CEPH_MSG_OSD_OPREPLY,
              Request,
@@ -322,6 +346,7 @@ CephRbdBlockIoCallClassMethod (
              &ReplyDataLength
              );
   if (EFI_ERROR (Status)) {
+    CephRbdOsdClientPoolRelease (OsdPool, OsdIds[0]);
     return Status;
   }
 
@@ -390,6 +415,7 @@ CephRbdBlockIoBuildObjectName (
 EFI_STATUS
 CephRbdBlockIoDiscover (
   IN OUT CEPH_RBD_MSGR_V1_CLIENT  *Client,
+  IN     CEPH_RBD_OSD_CLIENT_POOL *OsdPool,
   IN UINT32                       PoolId,
   IN CONST CHAR8                  *ImageName,
   IN UINTN                        ImageNameLength,
@@ -413,7 +439,7 @@ CephRbdBlockIoDiscover (
   UINT64                    StripeCount;
   CEPH_WIRE_WRITER          Writer;
 
-  if ((Client == NULL) || (ImageName == NULL) ||
+  if ((Client == NULL) || (OsdPool == NULL) || (ImageName == NULL) ||
       (ImageNameLength == 0) ||
       (ImageNameLength >= CEPH_RBD_MAX_IMAGE_NAME) || (Fsid == NULL) ||
       (Device == NULL) || (PoolId == 0) ||
@@ -453,7 +479,8 @@ CephRbdBlockIoDiscover (
   }
 
   Status = CephRbdBlockIoCallClassMethod (
-             Client,
+             OsdPool,
+             &Device->Placement,
              PoolId,
              Device->OsdEpoch,
              (CONST CHAR8 *)ObjectName,
@@ -503,7 +530,8 @@ CephRbdBlockIoDiscover (
   }
 
   Status = CephRbdBlockIoCallClassMethod (
-             Client,
+             OsdPool,
+             &Device->Placement,
              PoolId,
              Device->OsdEpoch,
              (CONST CHAR8 *)ObjectName,
@@ -531,7 +559,8 @@ CephRbdBlockIoDiscover (
   }
 
   Status = CephRbdBlockIoCallClassMethod (
-             Client,
+             OsdPool,
+             &Device->Placement,
              PoolId,
              Device->OsdEpoch,
              (CONST CHAR8 *)ObjectName,
@@ -565,7 +594,8 @@ CephRbdBlockIoDiscover (
   Metadata.Features = Features;
 
   Status = CephRbdBlockIoCallClassMethod (
-             Client,
+             OsdPool,
+             &Device->Placement,
              PoolId,
              Device->OsdEpoch,
              (CONST CHAR8 *)ObjectName,
@@ -596,7 +626,8 @@ CephRbdBlockIoDiscover (
 
   if ((Features & CEPH_RBD_FEATURE_STRIPINGV2) != 0) {
     Status = CephRbdBlockIoCallClassMethod (
-               Client,
+               OsdPool,
+               &Device->Placement,
                PoolId,
                Device->OsdEpoch,
                (CONST CHAR8 *)ObjectName,
@@ -670,7 +701,7 @@ CephRbdBlockIoGetObjectPlacement (
 
 EFI_STATUS
 CephRbdBlockIoReadBlocks (
-  IN OUT CEPH_RBD_MSGR_V1_CLIENT  *Client,
+  IN     CEPH_RBD_OSD_CLIENT_POOL *OsdPool,
   IN OUT CEPH_RBD_BLOCK_DEVICE    *Device,
   IN UINT64                       StartLba,
   IN UINTN                        NumberOfBlocks,
@@ -678,8 +709,9 @@ CephRbdBlockIoReadBlocks (
   IN UINTN                        BufferSize
   )
 {
-  EFI_STATUS         Status;
-  CEPH_RBD_EXTENT    Extent;
+  EFI_STATUS                   Status;
+  CEPH_RBD_EXTENT              Extent;
+  CEPH_RBD_MSGR_V1_CLIENT     *OsdClient;
   UINT64             ImageOffset;
   UINT64             Remaining;
   UINTN              Copied;
@@ -698,7 +730,7 @@ CephRbdBlockIoReadBlocks (
   CEPH_OSD_OP_REQUEST Op;
   CEPH_OSD_OP_REPLY   Reply;
 
-  if ((Client == NULL) || (Device == NULL) || !Device->Ready ||
+  if ((OsdPool == NULL) || (Device == NULL) || !Device->Ready ||
       (Buffer == NULL) || (NumberOfBlocks == 0) ||
       (NumberOfBlocks > CEPH_RBD_MAX_READ_BLOCKS))
   {
@@ -741,9 +773,7 @@ CephRbdBlockIoReadBlocks (
     }
 
     // Resolve the object's acting set from the OSDMap. The primary is the
-    // first OSD in the set. Routing the OSD op requires a per-OSD messenger
-    // session with an OSD service ticket, which is a separate step; for now
-    // the primary is recorded and the op uses the existing connected session.
+    // first OSD in the set; send the READ over its authenticated session.
     Status = CephRbdPlacementMapObject (
                &Device->Placement,
                (CONST CHAR8 *)ObjectName,
@@ -760,6 +790,13 @@ CephRbdBlockIoReadBlocks (
 
     Device->PrimaryOsd = OsdIds[0];
 
+    Status = CephRbdOsdClientPoolGet (
+               OsdPool, &Device->Placement, OsdIds[0], &OsdClient
+               );
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+
     ZeroMem (&Op, sizeof (Op));
     Op.Op = CEPH_OSD_OP_READ;
     Op.Flags = CEPH_OSD_FLAG_READ |
@@ -771,7 +808,7 @@ CephRbdBlockIoReadBlocks (
                Device->PoolId,
                Device->ClientIncarnation,
                Device->OsdEpoch,
-               Client->Session.NextOutgoingSequence,
+               OsdClient->Session.NextOutgoingSequence,
                (CONST CHAR8 *)ObjectName,
                ObjectNameLength,
                &Op,
@@ -784,8 +821,8 @@ CephRbdBlockIoReadBlocks (
       return Status;
     }
 
-    Status = CephRpcCallAuto (
-               Client,
+    Status = CephRpcCall (
+               OsdClient,
                CEPH_MSG_OSD_OP,
                CEPH_MSG_OSD_OPREPLY,
                Request,
@@ -800,6 +837,7 @@ CephRbdBlockIoReadBlocks (
                &DataLength
                );
     if (EFI_ERROR (Status)) {
+      CephRbdOsdClientPoolRelease (OsdPool, OsdIds[0]);
       return Status;
     }
 

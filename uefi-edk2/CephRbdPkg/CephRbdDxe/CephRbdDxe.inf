@@ -38,6 +38,8 @@
   CephRbdPlacement.h
   CephRbdBlockIo.c
   CephRbdBlockIo.h
+  CephRbdOsdClient.c
+  CephRbdOsdClient.h
   CephRbdLayout.c
   CephRbdLayout.h
   CephRbdFormat2.c

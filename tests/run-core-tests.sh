@@ -39,6 +39,7 @@ cc -std=c11 -Wall -Wextra -Werror \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdRpc.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdAuth.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdBlockIo.c" \
+  "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdOsdClient.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdTcp4.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdLayout.c" \
   "$repo_root/uefi-edk2/CephRbdPkg/CephRbdDxe/CephRbdFormat2.c" \

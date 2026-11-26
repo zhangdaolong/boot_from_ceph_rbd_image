@@ -12,6 +12,7 @@
 #include "CephRbdRpc.h"
 #include "CephRbdAuth.h"
 #include "CephRbdPlacement.h"
+#include "CephRbdBlockIo.h"
 
 EFI_BOOT_SERVICES *gBS = NULL;
 
@@ -64,6 +65,8 @@ main (
   CEPH_RBD_MSGR_V1_CONNECT_CONFIG  OsdConfig;
   CEPH_RBD_AUTH_SESSION            Session;
   CEPH_RBD_SERVICE_AUTH            OsdAuth;
+  CEPH_RBD_OSD_CLIENT_POOL         OsdPool;
+  CEPH_RBD_BLOCK_DEVICE            Device;
   CEPH_MON_REQUEST_HEADER          Header;
   UINT8                            Fsid[16];
   UINT8                            Secret[CEPHX_AES_KEY_SIZE];
@@ -181,6 +184,11 @@ main (
         printf (" %02x", OsdAuth.SessionKey[KeyIndex]);
       }
       printf ("\n");
+
+      // Build the per-OSD authenticated session pool exactly as the DXE
+      // driver does at Start(). All subsequent OSD ops reuse this pool.
+      Status = CephRbdOsdClientPoolInit (&OsdPool, &OsdAuth, &Config);
+      printf ("osd_pool_init: status=%d\n", Status);
     }
   }
 
@@ -450,6 +458,39 @@ main (
           CephRbdMsgrV1ClientClose (&OsdClient, OsdConfig.TimeoutSeconds);
         }
       }
+    }
+
+    // End-to-end validation of the DXE data path. Metadata discovery and
+    // block reads both run through the per-OSD authenticated session pool,
+    // never over the monitor connection.
+    if (!EFI_ERROR (Status) && OsdAuth.Valid) {
+      static const CHAR8  DxeImage[] = "close-race-test";
+      UINT8               BlockData[512];
+      UINTN               DataIndex;
+
+      memset (&Device, 0, sizeof (Device));
+      Status = CephRbdBlockIoDiscover (
+                 &Client, &OsdPool, 4,
+                 DxeImage, sizeof (DxeImage) - 1,
+                 Fsid, &Device
+                 );
+      printf ("dxe_discover: status=%d ready=%d image_size=%llu\n",
+              Status, Device.Ready,
+              (unsigned long long)Device.Image.Layout.ImageSize);
+
+      if (!EFI_ERROR (Status)) {
+        memset (BlockData, 0, sizeof (BlockData));
+        Status = CephRbdBlockIoReadBlocks (
+                   &OsdPool, &Device, 0, 1, BlockData, sizeof (BlockData)
+                   );
+        printf ("dxe_read: status=%d data:", Status);
+        for (DataIndex = 0; DataIndex < 32; DataIndex++) {
+          printf (" %02x", BlockData[DataIndex]);
+        }
+        printf ("\n");
+      }
+
+      CephRbdOsdClientPoolClose (&OsdPool);
     }
 
   }

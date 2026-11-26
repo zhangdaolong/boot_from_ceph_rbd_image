@@ -6,6 +6,7 @@
 #include "CephRbdMsgrV1Recovery.h"
 #include "CephRbdRpc.h"
 #include "CephRbdPlacement.h"
+#include "CephRbdOsdClient.h"
 
 #define CEPH_RBD_BLOCK_SIZE                  512
 #define CEPH_RBD_MAX_READ_BLOCKS             ((CEPH_MSGR_V1_RETRANSMIT_FRAME_MAX - \
@@ -51,6 +52,7 @@ CephRbdBlockIoGetObjectPlacement (
 EFI_STATUS
 CephRbdBlockIoDiscover (
   IN OUT CEPH_RBD_MSGR_V1_CLIENT  *Client,
+  IN     CEPH_RBD_OSD_CLIENT_POOL *OsdPool,
   IN UINT32                       PoolId,
   IN CONST CHAR8                  *ImageName,
   IN UINTN                        ImageNameLength,
@@ -58,11 +60,12 @@ CephRbdBlockIoDiscover (
   OUT CEPH_RBD_BLOCK_DEVICE       *Device
   );
 
-// Read one or more blocks from the image. Each extent is translated into an
-// OSD object read; partial extents are gathered into the caller buffer.
+// Read one or more blocks from the image. Each extent is mapped to its acting
+// OSD set; the read is sent over an authenticated session to that object's
+// primary OSD (cached in OsdPool), not over the monitor connection.
 EFI_STATUS
 CephRbdBlockIoReadBlocks (
-  IN OUT CEPH_RBD_MSGR_V1_CLIENT  *Client,
+  IN     CEPH_RBD_OSD_CLIENT_POOL *OsdPool,
   IN OUT CEPH_RBD_BLOCK_DEVICE    *Device,
   IN UINT64                       StartLba,
   IN UINTN                        NumberOfBlocks,

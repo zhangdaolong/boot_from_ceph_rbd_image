@@ -27,6 +27,10 @@ cc -std=c11 -Wall -Wextra \
   "$dxe/CephRbdMsgrV1Recovery.c" \
   "$dxe/CephRbdRpc.c" \
   "$dxe/CephRbdAuth.c" \
+  "$dxe/CephRbdBlockIo.c" \
+  "$dxe/CephRbdOsdClient.c" \
+  "$dxe/CephRbdLayout.c" \
+  "$dxe/CephRbdFormat2.c" \
   -lcrypto \
   -o "$build_dir/live_probe"
 

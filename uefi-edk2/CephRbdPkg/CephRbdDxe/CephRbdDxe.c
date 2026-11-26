@@ -9,6 +9,7 @@
 #include "CephRbdConfig.h"
 #include "CephRbdDxe.h"
 #include "CephRbdMsgrV1Recovery.h"
+#include "CephRbdOsdClient.h"
 
 #define CEPH_RBD_DRIVER_MEDIA_ID  0x43455048
 
@@ -28,6 +29,7 @@ typedef struct {
   EFI_BLOCK_IO_MEDIA           Media;
   CEPH_RBD_DRIVER_STATE        State;
   CEPH_RBD_MSGR_V1_CLIENT      Client;
+  CEPH_RBD_OSD_CLIENT_POOL     OsdPool;
   CEPH_RBD_BLOCK_DEVICE        Device;
   CEPH_RBD_MSGR_V1_CONNECT_CONFIG  ConnectConfig;
   EFI_HANDLE                   BlockIoHandle;
@@ -119,7 +121,7 @@ CephRbdBlockIoRead (
   }
 
   return CephRbdBlockIoReadBlocks (
-           &Driver->Client,
+           &Driver->OsdPool,
            &Driver->Device,
            Lba,
            BufferSize / CEPH_RBD_BLOCK_SIZE,
@@ -173,9 +175,10 @@ CephRbdDriverInitialize (
   IN UINTN                                  SecretLength
   )
 {
-  EFI_STATUS              Status;
-  UINT64                  LastLba;
-  CEPH_RBD_AUTH_SESSION   Session;
+  EFI_STATUS               Status;
+  UINT64                   LastLba;
+  CEPH_RBD_AUTH_SESSION    Session;
+  CEPH_RBD_SERVICE_AUTH    OsdAuth;
 
   if ((Driver == NULL) || (Config == NULL) || (ControllerHandle == NULL) ||
       (ImageName == NULL) || (Fsid == NULL) ||
@@ -227,9 +230,47 @@ CephRbdDriverInitialize (
     return Status;
   }
 
+  // Ask the monitor for an OSD service ticket. Both metadata class-method
+  // calls and data reads are OSD ops, so they must authenticate to OSD
+  // endpoints directly rather than being sent over the monitor session.
+  Status = CephRbdAuthGetServiceTicket (
+             &Driver->Client,
+             &Session,
+             CEPH_ENTITY_TYPE_OSD,
+             &OsdAuth
+             );
+  if (EFI_ERROR (Status) || !OsdAuth.Valid) {
+    DEBUG ((DEBUG_ERROR,
+            "CephRbdDxe: OSD service ticket request failed with %d\n",
+            (INT32)Status
+            ));
+    CephRbdMsgrV1ClientClose (
+      &Driver->Client,
+      Driver->ConnectConfig.TimeoutSeconds
+      );
+    Driver->State = CephRbdStateFailed;
+    return EFI_ERROR (Status) ? Status : EFI_DEVICE_ERROR;
+  }
+
+  Status = CephRbdOsdClientPoolInit (
+             &Driver->OsdPool,
+             &OsdAuth,
+             &Driver->ConnectConfig
+             );
+  if (EFI_ERROR (Status)) {
+    CephRbdOsdClientPoolClose (&Driver->OsdPool);
+    CephRbdMsgrV1ClientClose (
+      &Driver->Client,
+      Driver->ConnectConfig.TimeoutSeconds
+      );
+    Driver->State = CephRbdStateFailed;
+    return Status;
+  }
+
   Driver->State = CephRbdStateMappingImage;
   Status = CephRbdBlockIoDiscover (
              &Driver->Client,
+             &Driver->OsdPool,
              PoolId,
              ImageName,
              ImageNameLength,
@@ -237,6 +278,7 @@ CephRbdDriverInitialize (
              &Driver->Device
              );
   if (EFI_ERROR (Status)) {
+    CephRbdOsdClientPoolClose (&Driver->OsdPool);
     CephRbdMsgrV1ClientClose (
       &Driver->Client,
       Driver->ConnectConfig.TimeoutSeconds
@@ -247,6 +289,7 @@ CephRbdDriverInitialize (
 
   Status = CephRbdBlockIoGetMediaLastLba (&Driver->Device, &LastLba);
   if (EFI_ERROR (Status)) {
+    CephRbdOsdClientPoolClose (&Driver->OsdPool);
     CephRbdMsgrV1ClientClose (
       &Driver->Client,
       Driver->ConnectConfig.TimeoutSeconds
@@ -281,6 +324,7 @@ CephRbdDriverInitialize (
                     &Driver->BlockIo
                     );
     if (EFI_ERROR (Status)) {
+      CephRbdOsdClientPoolClose (&Driver->OsdPool);
       CephRbdMsgrV1ClientClose (
         &Driver->Client,
         Driver->ConnectConfig.TimeoutSeconds
@@ -308,6 +352,7 @@ CephRbdDriverShutdown (
     return EFI_INVALID_PARAMETER;
   }
 
+  CephRbdOsdClientPoolClose (&Driver->OsdPool);
   CephRbdMsgrV1ClientClose (
     &Driver->Client,
     Driver->ConnectConfig.TimeoutSeconds != 0 ?
