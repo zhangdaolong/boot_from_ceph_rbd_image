@@ -84,7 +84,7 @@ CephMsgrDecodeV1Frame (
   }
 
   if (BufferLength <
-      (1 + CEPH_MSGR_V1_HEADER_SIZE + CEPH_MSGR_V1_FOOTER_SIZE))
+      (1 + CEPH_MSGR_V1_HEADER_SIZE + CEPH_MSGR_V1_FOOTER_LEGACY_SIZE))
   {
     return EFI_BAD_BUFFER_SIZE;
   }
@@ -110,9 +110,20 @@ CephMsgrDecodeV1Frame (
     return EFI_BAD_BUFFER_SIZE;
   }
 
-  ExpectedLength = 1 + CEPH_MSGR_V1_HEADER_SIZE + (UINTN)PayloadLength +
-                   CEPH_MSGR_V1_FOOTER_SIZE;
-  if (BufferLength != ExpectedLength) {
+  // Ceph uses a 13-byte footer (ceph_msg_footer_old) when MSG_AUTH is not
+  // negotiated and a 21-byte footer (with a u64 signature) otherwise. Infer
+  // it from the exact frame length.
+  if (BufferLength ==
+      (1 + CEPH_MSGR_V1_HEADER_SIZE + (UINTN)PayloadLength +
+       CEPH_MSGR_V1_FOOTER_LEGACY_SIZE))
+  {
+    ExpectedLength = CEPH_MSGR_V1_FOOTER_LEGACY_SIZE;
+  } else if (BufferLength ==
+             (1 + CEPH_MSGR_V1_HEADER_SIZE + (UINTN)PayloadLength +
+              CEPH_MSGR_V1_FOOTER_SIZE))
+  {
+    ExpectedLength = CEPH_MSGR_V1_FOOTER_SIZE;
+  } else {
     return EFI_BAD_BUFFER_SIZE;
   }
 
@@ -128,7 +139,8 @@ CephMsgrDecodeV1Frame (
 
   Offset = 1 + CEPH_MSGR_V1_HEADER_SIZE;
   Footer = Bytes + Offset + PayloadLength;
-  FooterFlags = Footer[20];
+  FooterFlags = (ExpectedLength == CEPH_MSGR_V1_FOOTER_LEGACY_SIZE) ?
+                Footer[12] : Footer[20];
   if ((FooterFlags & CEPH_MSGR_V1_FOOTER_COMPLETE) == 0) {
     return EFI_ABORTED;
   }
@@ -140,9 +152,18 @@ CephMsgrDecodeV1Frame (
     return EFI_UNSUPPORTED;
   }
 
-  if ((FooterFlags & CEPH_MSGR_V1_FOOTER_SIGNED) != 0) {
-    return EFI_UNSUPPORTED;
-  }
+  // CEPH_MSG_FOOTER_SIGNED may be set even in the 13-byte legacy footer: the
+  // server calls sign_message() (which sets the flag and footer.sig), then
+  // copies only front/middle/data_crc plus flags into ceph_msg_footer_old when
+  // CEPH_FEATURE_MSG_AUTH was not negotiated. The signature itself is not on
+  // the wire in that form, and Ceph's own receiver sets footer.sig = 0 but
+  // preserves the flags. We do not verify message signatures (the cluster has
+  // cephx_require_signatures=false and we never advertise MSG_AUTH), so accept
+  // the flag rather than rejecting an otherwise valid signed-by-server reply.
+  //
+  // For the 21-byte form the signature is present but we still do not verify
+  // it; the connection-level CephX session provides the authentication used by
+  // this firmware client.
 
   if ((CephMsgrReadLe32 (Footer) !=
        CephMsgrCrc32c (Bytes + Offset, FrontLength)) ||
@@ -216,13 +237,16 @@ CephMsgrEncodeV1Frame (
   }
 
   if ((Frame->FooterFlags & ~(CEPH_MSGR_V1_FOOTER_COMPLETE |
-                              CEPH_MSGR_V1_FOOTER_NOCRC)) != 0)
+                              CEPH_MSGR_V1_FOOTER_NOCRC |
+                              CEPH_MSGR_V1_FOOTER_LEGACY)) != 0)
   {
     return EFI_UNSUPPORTED;
   }
 
   RequiredLength = 1 + CEPH_MSGR_V1_HEADER_SIZE + (UINTN)PayloadLength +
-                   CEPH_MSGR_V1_FOOTER_SIZE;
+                   ((Frame->FooterFlags & CEPH_MSGR_V1_FOOTER_LEGACY) != 0 ?
+                    CEPH_MSGR_V1_FOOTER_LEGACY_SIZE :
+                    CEPH_MSGR_V1_FOOTER_SIZE);
   if (BufferLength < RequiredLength) {
     return EFI_BUFFER_TOO_SMALL;
   }
@@ -321,7 +345,10 @@ CephMsgrEncodeV1Frame (
                0 : CephMsgrCrc32c (Frame->Data, Frame->DataLength));
   }
 
-  if (!EFI_ERROR (Status)) {
+  if (!EFI_ERROR (Status) &&
+      ((Frame->FooterFlags & CEPH_MSGR_V1_FOOTER_LEGACY) == 0))
+  {
+    // The u64 signature field exists only in the MSG_AUTH footer form.
     Status = CephWireWriteLe64 (&Writer, 0);
   }
 

@@ -163,34 +163,69 @@ TestOsdOpCodecs (VOID)
            &Op, 1, Front, sizeof (Front), &Length) == EFI_SUCCESS);
   assert(Length > CEPH_OSD_OP_SIZE);
 
-  // Verify the request header fields are encoded in order.
+  // Verify the legacy v1 MOSDOp header fields are encoded in order:
+  // client_inc, old_pg_t{preferred,ps,pool}, su, osdmap_epoch, flags,
+  // mtime, reassert, oid_len, snapid, snap_seq, num_snaps, num_ops,
+  // ops[], oid bytes.
   assert(CephWireInit (&Cursor, Front, Length) == EFI_SUCCESS);
   assert(CephWireReadLe32 (&Cursor, &Value) == EFI_SUCCESS);   // client_inc
   assert(Value == 1);
+  {
+    UINT16 Preferred;
+    UINT16 Ps;
+
+    assert(CephWireReadLe16 (&Cursor, &Preferred) == EFI_SUCCESS);
+    assert(Preferred == 0xffff);                 // -1
+    assert(CephWireReadLe16 (&Cursor, &Ps) == EFI_SUCCESS);
+    assert(Ps == 0);
+    assert(CephWireReadLe32 (&Cursor, &Value) == EFI_SUCCESS); // pool
+    assert(Value == 3);
+  }
+  assert(CephWireSkip (&Cursor, 4) == EFI_SUCCESS);           // su
   assert(CephWireReadLe32 (&Cursor, &Value) == EFI_SUCCESS);   // osdmap epoch
   assert(Value == 42);
   assert(CephWireReadLe32 (&Cursor, &Value) == EFI_SUCCESS);   // flags
   assert(Value == CEPH_OSD_FLAG_READ);
-  assert(CephWireSkip (&Cursor, 4 + 4 + 4 + 8 + 8) == EFI_SUCCESS);
-  assert(CephWireReadLe32 (&Cursor, &Value) == EFI_SUCCESS);   // key length
-  assert(Value == 0);
-  assert(CephWireSkip (&Cursor, 4 + 4) == EFI_SUCCESS);        // nspace, hash
+  assert(CephWireSkip (&Cursor, 4 + 4 + 4 + 8) == EFI_SUCCESS); // mtime,reassert
   assert(CephWireReadLe32 (&Cursor, &Value) == EFI_SUCCESS);   // oid length
   assert(Value == 29);
-  assert(CephWireSkip (&Cursor, 29) == EFI_SUCCESS);
+  assert(CephWireSkip (&Cursor, 8 + 8 + 4) == EFI_SUCCESS);    // snap,snapseq,n
   assert(CephWireReadLe16 (&Cursor, &NumOps) == EFI_SUCCESS);
   assert(NumOps == 1);
   assert(CephWireReadLe16 (&Cursor, (UINT16 *)&Value) == EFI_SUCCESS);
   assert(Value == CEPH_OSD_OP_READ);
 
-  // Build an OSD reply front and decode result and op return values.
-  memset (ReplyFront, 0, sizeof (ReplyFront));
-  WriteLe32 (ReplyFront, 4);                  // oid name length
-  memcpy (ReplyFront + 4, "data", 4);         // oid name
-  // pgid(8) + flags(8) then result at offset 24.
-  WriteLe32 (ReplyFront + 24, 0);             // result
-  WriteLe32 (ReplyFront + 44, 1);             // num_ops
-  WriteLe32 (ReplyFront + 48 + CEPH_OSD_OP_SIZE, 0);  // op rval
+  // Build an OSD reply front in the Ceph 22 HEAD_VERSION (v8) layout and
+  // decode result and op return values. Layout (verified against Ceph 22):
+  //   oid: u32 len + bytes
+  //   pg_t: u8 v + u64 pool + u32 ps + i32 preferred
+  //   s64 flags, i32 result
+  //   eversion_t: u64 version + u32 epoch
+  //   u32 osdmap_epoch, u32 num_ops, ceph_osd_op ops[], i32 retry_attempt,
+  //   i32 rval[] (one per op).
+  {
+    UINTN  Offset;
+
+    memset (ReplyFront, 0, sizeof (ReplyFront));
+    Offset = 0;
+    WriteLe32 (ReplyFront + Offset, 4);        // oid name length
+    Offset += 4;
+    memcpy (ReplyFront + Offset, "data", 4);   // oid name
+    Offset += 4;
+    ReplyFront[Offset++] = 1;                  // pg_t struct_v
+    WriteLe64 (ReplyFront + Offset, 3); Offset += 8;   // pool
+    WriteLe32 (ReplyFront + Offset, 6); Offset += 4;   // ps
+    WriteLe32 (ReplyFront + Offset, 0xffffffff); Offset += 4; // preferred (-1)
+    WriteLe64 (ReplyFront + Offset, 0); Offset += 8;   // flags (s64)
+    WriteLe32 (ReplyFront + Offset, 0); Offset += 4;   // result
+    WriteLe64 (ReplyFront + Offset, 0); Offset += 8;   // bad_replay version
+    WriteLe32 (ReplyFront + Offset, 0); Offset += 4;   // bad_replay epoch
+    WriteLe32 (ReplyFront + Offset, 42); Offset += 4;  // osdmap epoch
+    WriteLe32 (ReplyFront + Offset, 1); Offset += 4;   // num_ops
+    Offset += CEPH_OSD_OP_SIZE;                // op
+    WriteLe32 (ReplyFront + Offset, 0); Offset += 4;   // retry_attempt
+    WriteLe32 (ReplyFront + Offset, 0); Offset += 4;   // op rval
+  }
 
   assert(CephRpcDecodeOsdOpReply (
            ReplyFront, sizeof (ReplyFront), ReplyData, sizeof (ReplyData),
@@ -213,8 +248,8 @@ TestOsdOpCodecs (VOID)
            3, 1, 42, 8, "rbd_header.abc", 14,
            &Op, 1, Front, sizeof (Front), &Length) == EFI_SUCCESS);
   assert(CephWireInit (&Cursor, Front, Length) == EFI_SUCCESS);
-  // 72 bytes of header through num_ops, then op u16 + flags u32.
-  assert(CephWireSkip (&Cursor, 72 + 2 + 4) == EFI_SUCCESS);
+  // 70 bytes of header through num_ops, then op u16 + flags u32.
+  assert(CephWireSkip (&Cursor, 70 + 2 + 4) == EFI_SUCCESS);
   assert(CephWireReadU8 (&Cursor, &ClassLen) == EFI_SUCCESS);
   assert(ClassLen == 3);
 }

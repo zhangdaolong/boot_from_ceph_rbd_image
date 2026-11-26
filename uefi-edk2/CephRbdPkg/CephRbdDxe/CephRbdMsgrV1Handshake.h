@@ -17,6 +17,9 @@
 typedef struct {
   CEPH_MSGR_V1_CONNECT_REPLY  ConnectReply;
   CEPH_MSGR_CONNECT_ACTION    Action;
+  // The feature bits we advertised in the connect frame. The effective
+  // negotiated set is ConnectReply.Features & SupportedFeatures.
+  UINT64                      SupportedFeatures;
   UINT32                      AuthorizerReplyLength;
   UINT8                       AuthorizerReply[CEPH_MSGR_V1_MAX_AUTHOR_REPLY];
   BOOLEAN                     Ready;

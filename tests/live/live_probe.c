@@ -318,18 +318,40 @@ main (
       }
     }
 
-    // Connect to the primary OSD and authenticate with the OSD service
-    // ticket obtained earlier. Validate the connect-time CephX challenge
-    // round-trip against the live cluster.
-    if (OsdAuth.Valid && (OsdCount > 0)) {
-      UINT32  PrimaryIpv4;
-      UINT16  PrimaryPort;
+    // Connect to the primary OSD for a known object, authenticate with the
+    // OSD service ticket, then issue a real OSD READ op against it.
+    {
+      static const CHAR8  TestObject[] = "rbd_id.close-race-test";
+      INT32               TestOsdIds[16];
+      UINTN               TestOsdCount;
+      UINT32              TestPg;
+      UINT32              TestPrimaryIpv4;
+      UINT16              TestPrimaryPort;
+      CEPH_OSD_OP_REQUEST ReadOp;
+      UINT8               OpRequest[512];
+      UINTN               OpRequestLength;
+      UINT8               OpReplyFront[512];
+      UINT8               OpReplyData[256];
+      UINTN               OpReplyFrontLength;
+      UINTN               OpReplyDataLength;
+      CEPH_OSD_OP_REPLY   OpReply;
 
-      Status = CephRbdPlacementGetOsdAddress (
-                 &Placement, OsdIds[0], &PrimaryIpv4, &PrimaryPort
+      Status = CephRbdPlacementMapObject (
+                 &Placement, TestObject, sizeof (TestObject) - 1,
+                 &TestPg, NULL, TestOsdIds, 16, &TestOsdCount
                  );
-      if (!EFI_ERROR (Status)) {
-        const UINT8 *Bytes = (const UINT8 *)&PrimaryIpv4;
+      printf ("test object: status=%d pg=%u osd_count=%lu acting=[%d,%d,%d]\n",
+              Status, TestPg, (unsigned long)TestOsdCount,
+              TestOsdCount > 0 ? TestOsdIds[0] : -1,
+              TestOsdCount > 1 ? TestOsdIds[1] : -1,
+              TestOsdCount > 2 ? TestOsdIds[2] : -1);
+
+      if (!EFI_ERROR (Status) && (TestOsdCount > 0) && OsdAuth.Valid &&
+          !EFI_ERROR (CephRbdPlacementGetOsdAddress (
+                        &Placement, TestOsdIds[0],
+                        &TestPrimaryIpv4, &TestPrimaryPort)))
+      {
+        const UINT8 *Bytes = (const UINT8 *)&TestPrimaryIpv4;
 
         memset (&OsdConfig, 0, sizeof (OsdConfig));
         OsdConfig.ImageHandle = (EFI_HANDLE)&OsdClient;
@@ -338,8 +360,24 @@ main (
         OsdConfig.RemoteAddress.Addr[1] = Bytes[1];
         OsdConfig.RemoteAddress.Addr[2] = Bytes[2];
         OsdConfig.RemoteAddress.Addr[3] = Bytes[3];
-        OsdConfig.RemotePort = PrimaryPort;
-        OsdConfig.SupportedFeatures = Config.SupportedFeatures;
+        OsdConfig.RemotePort = TestPrimaryPort;
+        // Do not advertise MSG_AUTH: this probe does not sign message
+        // footers, and Ceph verifies signatures whenever the feature is
+        // negotiated. The cluster has cephx_require_signatures=false.
+        //
+        // Do not advertise RESEND_ON_SPLIT (ceph_features.h bit 21,
+        // incarnation 2). Our MOSDOp uses the legacy v1 encoding: the OSD
+        // recalculates the placement seed from the object name and stores the
+        // full 32-bit Jenkins hash in pg_t::ps. When RESEND_ON_SPLIT is
+        // advertised the OSD trusts that raw pgid directly and enqueues it,
+        // yielding e.g. "4.1228e1dc ... no pg, shouldn't exist". Without the
+        // feature the OSD routes through dispatch_session_waiting(), which
+        // calls raw_pg_to_pg() to reduce the hash with ceph_stable_mod()
+        // against the pool's pg_num/pg_num_mask, producing the canonical PG
+        // (for this object, 4.1c / pg 28) and finding the primary OSD.
+        OsdConfig.SupportedFeatures = Config.SupportedFeatures &
+                                      ~(UINT64_C(1) << 23) &
+                                      ~(UINT64_C(1) << 21);
         OsdConfig.RequiredFeatures = Config.RequiredFeatures;
         OsdConfig.HostType = CEPH_MSGR_CONNECT_HOST_CLIENT;
         OsdConfig.ProtocolVersion = CEPH_OSDC_PROTOCOL;
@@ -349,17 +387,71 @@ main (
         Status = CephRbdAuthConnectOsd (&OsdConfig, &OsdAuth, &OsdClient);
         printf ("osd_connect: osd=%d addr=%u.%u.%u.%u:%u status=%d "
                 "ready=%d action=%d\n",
-                (int)OsdIds[0], Bytes[0], Bytes[1], Bytes[2], Bytes[3],
-                (unsigned)PrimaryPort, Status,
+                (int)TestOsdIds[0], Bytes[0], Bytes[1], Bytes[2], Bytes[3],
+                (unsigned)TestPrimaryPort, Status,
                 OsdClient.Session.Ready,
                 (int)OsdClient.Negotiation.Action);
+        printf ("osd_negotiation: features=0x%llx msg_auth=%d footer_size=%lu\n",
+                (unsigned long long)OsdClient.Negotiation.ConnectReply.Features,
+                (int)((OsdClient.Negotiation.ConnectReply.Features &
+                       CEPH_FEATURE_MSG_AUTH) != 0),
+                (unsigned long)OsdClient.Session.FooterSize);
+
+        if (!EFI_ERROR (Status) && OsdClient.Session.Ready) {
+          memset (&ReadOp, 0, sizeof (ReadOp));
+          ReadOp.Op = CEPH_OSD_OP_READ;
+          ReadOp.Flags = CEPH_OSD_FLAG_READ;
+          ReadOp.Offset = 0;
+          ReadOp.Length = 16;
+
+          Status = CephRpcEncodeOsdOp (
+                     4, 1, (UINT32)Placement.Epoch, 1,
+                     TestObject, sizeof (TestObject) - 1,
+                     &ReadOp, 1,
+                     OpRequest, sizeof (OpRequest), &OpRequestLength
+                     );
+          if (!EFI_ERROR (Status)) {
+            // Call directly (no auto-reconnect) so the real OSD op error is
+            // visible; the generic reconnect path has no CephX service ticket.
+            Status = CephRpcCall (
+                       &OsdClient, CEPH_MSG_OSD_OP, CEPH_MSG_OSD_OPREPLY,
+                       OpRequest, OpRequestLength,
+                       NULL, 0,
+                       OpReplyFront, sizeof (OpReplyFront), &OpReplyFrontLength,
+                       OpReplyData, sizeof (OpReplyData), &OpReplyDataLength
+                       );
+          }
+          printf ("osd_read: status=%d reply_len=%lu data_len=%lu\n",
+                  Status, (unsigned long)OpReplyFrontLength,
+                  (unsigned long)OpReplyDataLength);
+
+          if (!EFI_ERROR (Status)) {
+            Status = CephRpcDecodeOsdOpReply (
+                       OpReplyFront, OpReplyFrontLength,
+                       OpReplyData, OpReplyDataLength, &OpReply
+                       );
+          printf ("osd_read reply: status=%d result=%d num_ops=%u "
+                  "data_len=%lu\n",
+                  Status, OpReply.Result, OpReply.NumOps,
+                  (unsigned long)OpReply.DataLength);
+            if (!EFI_ERROR (Status) && (OpReply.DataLength > 0)) {
+              UINTN  DataIndex;
+              printf ("osd_read data:");
+              for (DataIndex = 0; DataIndex < OpReply.DataLength &&
+                                  DataIndex < 32; DataIndex++) {
+                printf (" %02x", OpReply.Data[DataIndex]);
+              }
+              printf ("\n");
+            }
+          }
+        }
+
         if (OsdClient.Connected) {
           CephRbdMsgrV1ClientClose (&OsdClient, OsdConfig.TimeoutSeconds);
         }
-      } else {
-        printf ("osd_connect: get addr status=%d\n", Status);
       }
     }
+
   }
 
   CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);

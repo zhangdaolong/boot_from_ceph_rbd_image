@@ -156,6 +156,14 @@ CephMsgrV1SessionInit (
   Session->Connection      = Connection;
   Session->NextOutgoingSequence = 1;
   Session->MaximumPayload  = MaximumPayload;
+  // connect_reply.features can include server-required bits even when we did
+  // not advertise them. The effective negotiated set is the intersection with
+  // what we sent in the connect frame. Without MSG_AUTH, Ceph uses the
+  // 13-byte ceph_msg_footer_old; otherwise the 21-byte signed form.
+  Session->FooterSize =
+    (((Negotiation->ConnectReply.Features &
+       Negotiation->SupportedFeatures) & CEPH_FEATURE_MSG_AUTH) != 0) ?
+    CEPH_MSGR_V1_FOOTER_SIZE : CEPH_MSGR_V1_FOOTER_LEGACY_SIZE;
   Session->TimeoutSeconds = TimeoutSeconds;
   Session->Ready           = TRUE;
   return EFI_SUCCESS;
@@ -188,6 +196,9 @@ CephMsgrV1SessionSendMessage (
 
   CopyMem (&Outgoing, Frame, sizeof (Outgoing));
   Outgoing.Sequence = Session->NextOutgoingSequence;
+  if (Session->FooterSize == CEPH_MSGR_V1_FOOTER_LEGACY_SIZE) {
+    Outgoing.FooterFlags |= CEPH_MSGR_V1_FOOTER_LEGACY;
+  }
   *FrameLength = 0;
   Status = CephMsgrEncodeV1Frame (
              &Outgoing,
@@ -263,6 +274,7 @@ CephMsgrV1SessionReceiveMessage (
                Session->Connection,
                Tag,
                Session->MaximumPayload,
+               Session->FooterSize,
                Session->TimeoutSeconds,
                FrameBuffer,
                FrameBufferCapacity,

@@ -275,6 +275,23 @@ TestMessenger(void)
            &outbound, 6, encoded_frame, sizeof(encoded_frame),
            &encoded_length) == EFI_UNSUPPORTED);
   assert(encoded_length == 0);
+
+  // ceph_msg_footer_old (13 bytes, flags at index 12) is used when MSG_AUTH
+  // is not negotiated. No u64 signature is emitted in that form.
+  outbound.FooterFlags = CEPH_MSGR_V1_FOOTER_LEGACY;
+  assert(CephMsgrEncodeV1Frame(
+           &outbound, 6, encoded_frame, sizeof(encoded_frame),
+           &encoded_length) == EFI_SUCCESS);
+  assert(encoded_length ==
+         (1 + CEPH_MSGR_V1_HEADER_SIZE + 6 +
+          CEPH_MSGR_V1_FOOTER_LEGACY_SIZE));
+  assert((encoded_frame[1 + CEPH_MSGR_V1_HEADER_SIZE + 6 + 12] &
+          CEPH_MSGR_V1_FOOTER_COMPLETE) != 0);
+  assert(CephMsgrDecodeV1Frame(
+           encoded_frame, encoded_length, 6, &frame) == EFI_SUCCESS);
+  assert(frame.FrontLength == 2 && memcmp(frame.Front, "ok", 2) == 0);
+  assert(frame.DataLength == 3 && memcmp(frame.Data, "xyz", 3) == 0);
+  assert((frame.FooterFlags & CEPH_MSGR_V1_FOOTER_COMPLETE) != 0);
 }
 
 static void

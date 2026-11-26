@@ -12,6 +12,10 @@ typedef struct {
   UINT64                    LastIncomingSequence;
   UINT64                    PeerAcknowledgedSequence;
   UINTN                     MaximumPayload;
+  // Ceph uses a 13-byte legacy footer unless CEPH_FEATURE_MSG_AUTH is
+  // negotiated (21 bytes with a signature). Derived from the negotiated
+  // feature set at connect time and used for both send and receive.
+  UINTN                     FooterSize;
   UINT32                    TimeoutSeconds;
   BOOLEAN                   Ready;
 } CEPH_MSGR_V1_SESSION;

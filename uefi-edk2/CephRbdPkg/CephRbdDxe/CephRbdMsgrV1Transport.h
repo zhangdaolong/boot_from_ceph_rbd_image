@@ -20,6 +20,7 @@ EFI_STATUS
 CephMsgrV1ReceiveFrame (
   IN CEPH_RBD_TCP4_CONNECTION  *Connection,
   IN UINTN                     MaximumPayload,
+  IN UINTN                     FooterSize,
   IN UINT32                    TimeoutSeconds,
   OUT VOID                     *FrameBuffer,
   IN UINTN                     FrameBufferCapacity,
@@ -32,6 +33,7 @@ CephMsgrV1ReceiveFrameAfterTag (
   IN CEPH_RBD_TCP4_CONNECTION  *Connection,
   IN UINT8                     Tag,
   IN UINTN                     MaximumPayload,
+  IN UINTN                     FooterSize,
   IN UINT32                    TimeoutSeconds,
   OUT VOID                     *FrameBuffer,
   IN UINTN                     FrameBufferCapacity,

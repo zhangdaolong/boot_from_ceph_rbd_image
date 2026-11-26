@@ -427,6 +427,10 @@ CephRbdMsgrV1FinishSeqRecovery (
   Session->Connection = &Client->Connection;
   Session->NextOutgoingSequence = NewlyAckedSequence + 1;
   Session->MaximumPayload = CEPH_MSGR_V1_SESSION_FRAME_MAX;
+  Session->FooterSize =
+    (((Client->Negotiation.ConnectReply.Features &
+       Client->Negotiation.SupportedFeatures) & CEPH_FEATURE_MSG_AUTH) != 0) ?
+    CEPH_MSGR_V1_FOOTER_SIZE : CEPH_MSGR_V1_FOOTER_LEGACY_SIZE;
   Session->TimeoutSeconds = Config->TimeoutSeconds;
   Session->Ready = TRUE;
   Client->Negotiation.Ready = TRUE;

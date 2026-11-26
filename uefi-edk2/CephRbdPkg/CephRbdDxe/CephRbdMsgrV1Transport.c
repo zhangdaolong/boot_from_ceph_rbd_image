@@ -67,6 +67,7 @@ CephMsgrV1ReceiveFrameAfterTag (
   IN CEPH_RBD_TCP4_CONNECTION  *Connection,
   IN UINT8                     Tag,
   IN UINTN                     MaximumPayload,
+  IN UINTN                     FooterSize,
   IN UINT32                    TimeoutSeconds,
   OUT VOID                     *FrameBuffer,
   IN UINTN                     FrameBufferCapacity,
@@ -85,14 +86,16 @@ CephMsgrV1ReceiveFrameAfterTag (
   if ((Connection == NULL) || (FrameBuffer == NULL) ||
       (Frame == NULL) || (FrameLength == NULL) ||
       (TimeoutSeconds == 0) || !Connection->Connected ||
-      (Connection->Tcp4 == NULL))
+      (Connection->Tcp4 == NULL) ||
+      ((FooterSize != CEPH_MSGR_V1_FOOTER_LEGACY_SIZE) &&
+       (FooterSize != CEPH_MSGR_V1_FOOTER_SIZE)))
   {
     return EFI_INVALID_PARAMETER;
   }
 
   *FrameLength = 0;
   if (FrameBufferCapacity <
-      (1 + CEPH_MSGR_V1_HEADER_SIZE + CEPH_MSGR_V1_FOOTER_SIZE))
+      (1 + CEPH_MSGR_V1_HEADER_SIZE + FooterSize))
   {
     return EFI_BUFFER_TOO_SMALL;
   }
@@ -141,8 +144,7 @@ CephMsgrV1ReceiveFrameAfterTag (
     return EFI_BAD_BUFFER_SIZE;
   }
 
-  RequiredLength = 1 + CEPH_MSGR_V1_HEADER_SIZE + PayloadLength +
-                   CEPH_MSGR_V1_FOOTER_SIZE;
+  RequiredLength = 1 + CEPH_MSGR_V1_HEADER_SIZE + PayloadLength + FooterSize;
   if (RequiredLength > FrameBufferCapacity) {
     return EFI_BUFFER_TOO_SMALL;
   }
@@ -150,7 +152,7 @@ CephMsgrV1ReceiveFrameAfterTag (
   Status = CephRbdTcp4ReceiveExact (
              Connection,
              Bytes + 1 + CEPH_MSGR_V1_HEADER_SIZE,
-             PayloadLength + CEPH_MSGR_V1_FOOTER_SIZE,
+             PayloadLength + FooterSize,
              TimeoutSeconds
              );
   if (EFI_ERROR (Status)) {
@@ -175,6 +177,7 @@ EFI_STATUS
 CephMsgrV1ReceiveFrame (
   IN CEPH_RBD_TCP4_CONNECTION  *Connection,
   IN UINTN                     MaximumPayload,
+  IN UINTN                     FooterSize,
   IN UINT32                    TimeoutSeconds,
   OUT VOID                     *FrameBuffer,
   IN UINTN                     FrameBufferCapacity,
@@ -188,7 +191,9 @@ CephMsgrV1ReceiveFrame (
   if ((Connection == NULL) || (FrameBuffer == NULL) ||
       (Frame == NULL) || (FrameLength == NULL) ||
       (TimeoutSeconds == 0) || !Connection->Connected ||
-      (Connection->Tcp4 == NULL))
+      (Connection->Tcp4 == NULL) ||
+      ((FooterSize != CEPH_MSGR_V1_FOOTER_LEGACY_SIZE) &&
+       (FooterSize != CEPH_MSGR_V1_FOOTER_SIZE)))
   {
     return EFI_INVALID_PARAMETER;
   }
@@ -208,6 +213,7 @@ CephMsgrV1ReceiveFrame (
            Connection,
            Tag,
            MaximumPayload,
+           FooterSize,
            TimeoutSeconds,
            FrameBuffer,
            FrameBufferCapacity,

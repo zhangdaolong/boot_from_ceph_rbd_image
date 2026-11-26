@@ -141,6 +141,7 @@ CephMsgrV1SendConnectAndReadReply (
   }
 
   ZeroMem (Negotiation, sizeof (*Negotiation));
+  Negotiation->SupportedFeatures = SupportedFeatures;
 
   Status = CephMsgrEncodeV1Connect (
              SupportedFeatures,

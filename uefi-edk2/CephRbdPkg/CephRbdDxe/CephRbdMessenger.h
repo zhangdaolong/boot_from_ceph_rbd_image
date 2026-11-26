@@ -7,9 +7,16 @@
 #define CEPH_MSGR_V1_HEADER_SIZE       53
 #define CEPH_MSGR_V1_HEADER_CRC_OFFSET 49
 #define CEPH_MSGR_V1_FOOTER_SIZE       21
+// ceph_msg_footer_old: front_crc + middle_crc + data_crc + flags = 13 bytes.
+// Ceph uses this when CEPH_FEATURE_MSG_AUTH is not negotiated; the 21-byte
+// form adds a u64 signature before the flags byte.
+#define CEPH_MSGR_V1_FOOTER_LEGACY_SIZE 13
 #define CEPH_MSGR_V1_FOOTER_COMPLETE  0x01
 #define CEPH_MSGR_V1_FOOTER_NOCRC     0x02
 #define CEPH_MSGR_V1_FOOTER_SIGNED    0x04
+// Internal flag: emit/expect the pre-MSG_AUTH 13-byte footer (no signature
+// field). Ceph selects this form when CEPH_FEATURE_MSG_AUTH is not negotiated.
+#define CEPH_MSGR_V1_FOOTER_LEGACY    0x08
 #define CEPH_MSGR_TAG_READY            1
 #define CEPH_MSGR_TAG_RESETSESSION     2
 #define CEPH_MSGR_TAG_WAIT             3
@@ -26,6 +33,9 @@
 #define CEPH_MSGR_TAG_KEEPALIVE2      14
 #define CEPH_MSGR_TAG_KEEPALIVE2_ACK  15
 #define CEPH_MSGR_TAG_CHALLENGE_AUTH  16
+// CEPH_FEATURE_MSG_AUTH (ceph_features.h bit 23). When negotiated, the
+// messenger v1 frame carries a 21-byte signed footer; otherwise 13 bytes.
+#define CEPH_FEATURE_MSG_AUTH         0x00800000ULL
 #define CEPH_MSGR_CONNECT_LOSSY        1
 #define CEPH_MSGR_CONNECT_HOST_CLIENT  8
 #define CEPH_MSGR_V1_CONNECT_SIZE      33

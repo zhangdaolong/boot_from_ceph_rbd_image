@@ -725,6 +725,10 @@ TestMessengerSession(void)
   ZeroMem (&Negotiation, sizeof (Negotiation));
   Negotiation.Ready = TRUE;
   Negotiation.Action = CephMsgrConnectReady;
+  // Keep the test on the 21-byte signed footer path; incoming test frames are
+  // encoded without the legacy flag.
+  Negotiation.ConnectReply.Features = CEPH_FEATURE_MSG_AUTH;
+  Negotiation.SupportedFeatures = CEPH_FEATURE_MSG_AUTH;
   assert(CephMsgrV1SessionInit(
            &Session, &Connection, &Negotiation, 128, 2) == EFI_SUCCESS);
 
@@ -949,6 +953,7 @@ TestMessengerFrameTransport(void)
   assert(CephMsgrV1ReceiveFrame(
            &Connection,
            128,
+           CEPH_MSGR_V1_FOOTER_SIZE,
            2,
            FrameBuffer,
            sizeof (FrameBuffer),
@@ -970,6 +975,7 @@ TestMessengerFrameTransport(void)
     assert(CephMsgrV1ReceiveFrame(
              &Connection,
              128,
+             CEPH_MSGR_V1_FOOTER_SIZE,
              2,
              FrameBuffer,
              sizeof (FrameBuffer),
@@ -986,6 +992,7 @@ TestMessengerFrameTransport(void)
   assert(CephMsgrV1ReceiveFrame(
            &Connection,
            128,
+           CEPH_MSGR_V1_FOOTER_SIZE,
            2,
            FrameBuffer,
            sizeof (FrameBuffer),
@@ -999,6 +1006,7 @@ TestMessengerFrameTransport(void)
   assert(CephMsgrV1ReceiveFrame(
            &Connection,
            6,
+           CEPH_MSGR_V1_FOOTER_SIZE,
            2,
            FrameBuffer,
            sizeof (FrameBuffer),

@@ -452,7 +452,6 @@ CephRpcEncodeOsdOp (
   EFI_STATUS        Status;
   UINTN             Index;
   UINTN             RequiredLength;
-  UINT32            StripeUnit;
 
   if ((ObjectName == NULL) || (ObjectNameLength == 0) ||
       (ObjectNameLength > CEPH_RPC_MAX_COMMAND) || (Ops == NULL) ||
@@ -462,18 +461,35 @@ CephRpcEncodeOsdOp (
     return EFI_INVALID_PARAMETER;
   }
 
-  // Fixed fields: client_inc, osdmap_epoch, flags, mtime(2), reassert(2),
-  // locator pool/key/nspace/hash, oid length, oid, num_ops, snapid, snap_seq,
-  // num_snaps, retry_attempt, features(2), reqid inc/tid.
-  RequiredLength = sizeof (UINT32) * 3 + sizeof (UINT32) * 2 +
-                   sizeof (UINT32) * 2 + sizeof (UINT64) * 2 +
-                   sizeof (UINT32) * 4 + sizeof (UINT32) +
-                   ObjectNameLength + sizeof (UINT16) +
-                   sizeof (UINT64) * 2 + sizeof (UINT32) * 2 +
-                   sizeof (UINT32) * 2 + sizeof (UINT32) + sizeof (UINT64) +
-                   sizeof (UINT32);
+  // The legacy MOSDOp layout has no explicit reqid; the OSD derives it from
+  // client_inc, so RequestId is intentionally unused here.
+  (VOID)RequestId;
+
+  // MOSDOp "old" encoding (header.version < 2 in Ceph 22 decode_payload):
+  //   u32 client_inc
+  //   old_pg_t (ceph_pg raw, 8 bytes): u16 preferred, u16 ps, u32 pool
+  //     (the OSD recomputes ps from the oid hash; pool must be correct)
+  //   u32 su = 0
+  //   u32 osdmap_epoch
+  //   u32 flags
+  //   ceph_timespec mtime: u32 sec + u32 nsec
+  //   eversion_t reassert_version: u32 epoch + u64 version
+  //   u32 oid_len
+  //   u64 snapid
+  //   u64 snap_seq
+  //   u32 num_snaps
+  //   u16 num_ops
+  //   ceph_osd_op ops[]
+  //   oid bytes (nohead)
+  //   snaps (nohead, none)
+  RequiredLength = sizeof (UINT32) * 2 + sizeof (UINT32) * 2 +
+                   sizeof (UINT32) * 3 + sizeof (UINT32) * 2 +
+                   sizeof (UINT64) * 2 + sizeof (UINT32) +
+                   sizeof (UINT64) * 2 + sizeof (UINT32) +
+                   sizeof (UINT16) +
+                   OpCount * CEPH_OSD_OP_SIZE +
+                   ObjectNameLength;
   for (Index = 0; Index < OpCount; Index++) {
-    RequiredLength += CEPH_OSD_OP_SIZE;
     if (Ops[Index].Op == CEPH_OSD_OP_CALL) {
       RequiredLength += Ops[Index].ClassNameLength +
                         Ops[Index].MethodNameLength +
@@ -486,129 +502,85 @@ CephRpcEncodeOsdOp (
   }
 
   Status = CephWireWriterInit (&Writer, Buffer, BufferLength);
+
   if (!EFI_ERROR (Status)) {
-    // MOSDOp v6 encoding: client_inc, osdmap_epoch, flags, mtime,
-    // reassert_version, object_locator, oid, num_ops, ops, snapid, snap_seq,
-    // snaps, retry_attempt, features.
     Status = CephWireWriteLe32 (&Writer, ClientIncarnation);
   }
-
+  // old_pg_t is ceph_pg: u16 preferred (-1), u16 ps, u32 pool. The OSD
+  // recomputes ps from the oid hash, so only the pool field is significant.
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe16 (&Writer, 0xffff);  // preferred = -1
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe16 (&Writer, 0);  // ps
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, PoolId);  // pool
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, 0);  // su
+  }
   if (!EFI_ERROR (Status)) {
     Status = CephWireWriteLe32 (&Writer, OsdmapEpoch);
   }
-
   if (!EFI_ERROR (Status)) {
     Status = CephWireWriteLe32 (&Writer, CEPH_OSD_FLAG_READ);
   }
-
   if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe32 (&Writer, 0);  // mtime seconds
+    Status = CephWireWriteLe32 (&Writer, 0);  // mtime sec
   }
-
   if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe32 (&Writer, 0);  // mtime nanoseconds
+    Status = CephWireWriteLe32 (&Writer, 0);  // mtime nsec
   }
-
   if (!EFI_ERROR (Status)) {
     Status = CephWireWriteLe32 (&Writer, 0);  // reassert epoch
   }
-
   if (!EFI_ERROR (Status)) {
     Status = CephWireWriteLe64 (&Writer, 0);  // reassert version
   }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe64 (&Writer, PoolId);  // object locator pool
-  }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe32 (&Writer, 0);  // locator key length
-  }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe32 (&Writer, 0);  // locator nspace length
-  }
-
-  if (!EFI_ERROR (Status)) {
-    StripeUnit = 0;
-    Status = CephWireWriteLe32 (&Writer, StripeUnit);  // hash
-  }
-
   if (!EFI_ERROR (Status)) {
     Status = CephWireWriteLe32 (&Writer, (UINT32)ObjectNameLength);
   }
-
   if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteBytes (&Writer, ObjectName, ObjectNameLength);
+    // sobject_t snapid: CEPH_NOSNAP reads.
+    Status = CephWireWriteLe64 (&Writer, MAX_UINT64 - 1);
   }
-
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe64 (&Writer, 0);  // snap_seq
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireWriteLe32 (&Writer, 0);  // num_snaps
+  }
   if (!EFI_ERROR (Status)) {
     Status = CephWireWriteLe16 (&Writer, (UINT16)OpCount);
   }
 
   for (Index = 0; !EFI_ERROR (Status) && (Index < OpCount); Index++) {
     Status = CephRpcWriteOsdOp (&Writer, &Ops[Index]);
-    if (!EFI_ERROR (Status) &&
+    if (!EFI_ERROR (Status) && (Ops[Index].Op == CEPH_OSD_OP_CALL) &&
         (Ops[Index].ClassNameLength != 0) &&
         (Ops[Index].MethodNameLength != 0))
     {
+      // NOTE: class-method input belongs in the message data buffer; keeping
+      // it inline here is a known limitation of this legacy encoder.
       Status = CephWireWriteBytes (
-                 &Writer,
-                 Ops[Index].ClassName,
-                 Ops[Index].ClassNameLength
+                 &Writer, Ops[Index].ClassName, Ops[Index].ClassNameLength
                  );
       if (!EFI_ERROR (Status)) {
         Status = CephWireWriteBytes (
-                   &Writer,
-                   Ops[Index].MethodName,
-                   Ops[Index].MethodNameLength
+                   &Writer, Ops[Index].MethodName, Ops[Index].MethodNameLength
                    );
       }
-
       if (!EFI_ERROR (Status) && (Ops[Index].IndataLength != 0)) {
         Status = CephWireWriteBytes (
-                   &Writer,
-                   Ops[Index].Indata,
-                   Ops[Index].IndataLength
+                   &Writer, Ops[Index].Indata, Ops[Index].IndataLength
                    );
       }
     }
   }
 
   if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe64 (&Writer, 0);  // snapid
-  }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe64 (&Writer, 0);  // snap_seq
-  }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe32 (&Writer, 0);  // num_snaps
-  }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe32 (&Writer, 0);  // retry_attempt
-  }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe32 (&Writer, 0);  // features low
-  }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe32 (&Writer, 0);  // features high
-  }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe32 (&Writer, (UINT32)ClientIncarnation);
-  }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe64 (&Writer, RequestId);
-  }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireWriteLe32 (&Writer, 0);  // reqid inc
+    Status = CephWireWriteBytes (&Writer, ObjectName, ObjectNameLength);
   }
 
   if (EFI_ERROR (Status)) {
@@ -630,12 +602,15 @@ CephRpcDecodeOsdOpReply (
 {
   CEPH_WIRE_CURSOR  Cursor;
   EFI_STATUS        Status;
-  UINT8             StructVersion;
   UINT32            StringLength;
   UINT32            RawResult;
   UINT32            NumOps;
   UINT32            Index;
   INT32             Rval;
+  UINT8             StructVersion;
+  UINT64            Pool;
+  UINT32            Ps;
+  UINT32            Preferred;
 
   if ((Front == NULL) || (Reply == NULL)) {
     return EFI_INVALID_PARAMETER;
@@ -651,29 +626,53 @@ CephRpcDecodeOsdOpReply (
     return Status;
   }
 
-  // MOSDOpReply v6+: oid (string), pgid (u64), flags (s64), result (s32),
-  // bad_replay_version (u32 u64), osdmap_epoch (u32), num_ops (u32).
+  // MOSDOpReply HEAD_VERSION (v8) encode_payload() order (Ceph 22):
+  //   object_t oid         : u32 len + name bytes
+  //   pg_t pgid            : u8 struct_v(=1) + u64 pool + u32 ps + i32 preferred
+  //   s64 flags            : 8 bytes
+  //   errorcode32_t result : i32
+  //   eversion_t bad_replay: u64 version + u32 epoch (raw struct append)
+  //   u32 osdmap_epoch
+  //   u32 num_ops
+  //   ceph_osd_op ops[]    : 38 bytes each
+  //   i32 retry_attempt
+  //   i32 rval[]           : one per op (v4+)
+  //   eversion_t replay_version, u64 user_version, u8 do_redirect, trace
+  //
+  // We only need oid/pgid/flags/result/num_ops/rvals. The probe's READ op
+  // uses a single op and the actual returned bytes live in the message data
+  // buffer (already captured by CephRpcCall), not in the front.
   Status = CephWireReadLe32 (&Cursor, &StringLength);
   if (!EFI_ERROR (Status) && (StringLength > Cursor.Remaining)) {
     return EFI_BAD_BUFFER_SIZE;
   }
-
   if (!EFI_ERROR (Status)) {
     Status = CephWireSkip (&Cursor, StringLength);
   }
 
+  // pg_t::encode: u8 v, u64 pool, u32 ps, i32 preferred(-1).
   if (!EFI_ERROR (Status)) {
-    Status = CephWireSkip (&Cursor, sizeof (UINT64));  // pgid
+    Status = CephWireReadU8 (&Cursor, &StructVersion);
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe64 (&Cursor, &Pool);
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &Ps);
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Cursor, &Preferred);
   }
 
+  // int64_t flags.
   if (!EFI_ERROR (Status)) {
-    Status = CephWireSkip (&Cursor, sizeof (UINT64));  // flags
+    Status = CephWireSkip (&Cursor, sizeof (UINT64));
   }
 
+  // result (errorcode32_t is a packed i32).
   if (!EFI_ERROR (Status)) {
     Status = CephWireReadLe32 (&Cursor, &RawResult);
   }
-
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -683,39 +682,34 @@ CephRpcDecodeOsdOpReply (
     return EFI_SUCCESS;
   }
 
+  // eversion_t bad_replay_version: raw append of version_t(u64) + epoch_t(u32).
   if (!EFI_ERROR (Status)) {
-    Status = CephWireSkip (&Cursor, sizeof (UINT32));  // bad replay epoch
+    Status = CephWireSkip (&Cursor, sizeof (UINT64) + sizeof (UINT32));
   }
-
+  // u32 osdmap_epoch.
   if (!EFI_ERROR (Status)) {
-    Status = CephWireSkip (&Cursor, sizeof (UINT64));  // bad replay version
+    Status = CephWireSkip (&Cursor, sizeof (UINT32));
   }
-
-  if (!EFI_ERROR (Status)) {
-    Status = CephWireSkip (&Cursor, sizeof (UINT32));  // osdmap epoch
-  }
-
+  // u32 num_ops.
   if (!EFI_ERROR (Status)) {
     Status = CephWireReadLe32 (&Cursor, &NumOps);
   }
-
   if (EFI_ERROR (Status)) {
     return Status;
   }
-
   if (NumOps > 16) {
     return EFI_BAD_BUFFER_SIZE;
   }
 
   Reply->NumOps = NumOps;
-  for (Index = 0; Index < NumOps; Index++) {
+  for (Index = 0; !EFI_ERROR (Status) && (Index < NumOps); Index++) {
     Status = CephWireSkip (&Cursor, CEPH_OSD_OP_SIZE);
-    if (EFI_ERROR (Status)) {
-      return Status;
-    }
   }
-
-  // Each op carries an s32 return value in v4+ replies.
+  // i32 retry_attempt (v3+).
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireSkip (&Cursor, sizeof (UINT32));
+  }
+  // i32 rval per op (v4+); a nonzero per-op error becomes the reply result.
   for (Index = 0; !EFI_ERROR (Status) && (Index < NumOps); Index++) {
     Status = CephWireReadLe32 (&Cursor, (UINT32 *)&Rval);
     if (!EFI_ERROR (Status) && (Rval != 0)) {
@@ -724,6 +718,9 @@ CephRpcDecodeOsdOpReply (
   }
 
   (VOID)StructVersion;
+  (VOID)Pool;
+  (VOID)Ps;
+  (VOID)Preferred;
   return Status;
 }
 
