@@ -269,6 +269,20 @@ main (
             OsdCount > 0 ? OsdIds[0] : -1,
             OsdCount > 1 ? OsdIds[1] : -1,
             OsdCount > 2 ? OsdIds[2] : -1);
+
+    // Report each OSD's messenger-v1 endpoint decoded from the live OSDMap.
+    // Ipv4 is stored in network byte order.
+    {
+      UINTN  AddrIndex;
+      printf ("osd_addrs: count=%u\n", (unsigned)Placement.OsdCount);
+      for (AddrIndex = 0; AddrIndex < Placement.OsdCount; AddrIndex++) {
+        const CEPH_RBD_OSD_ADDR *Addr = &Placement.OsdAddr[AddrIndex];
+        const UINT8             *Bytes = (const UINT8 *)&Addr->Ipv4;
+        printf ("  osd%d: %u.%u.%u.%u:%u\n", (int)Addr->OsdId,
+                Bytes[0], Bytes[1], Bytes[2], Bytes[3],
+                (unsigned)Addr->Port);
+      }
+    }
   }
 
   CephRbdMsgrV1ClientClose (&Client, Config.TimeoutSeconds);
