@@ -279,6 +279,274 @@ CephRbdPlacementFindCrushMap (
   return EFI_NOT_FOUND;
 }
 
+// Decode one entity_addr_t. Modern OSDMaps encode marker 1 followed by
+// ENCODE_START(1,1), then type (u32), nonce (u32), elen (u32) and a
+// sockaddr_storage prefix. For AF_INET the first two bytes of sa_data are
+// the big-endian port and the next four are the IPv4 address in network byte
+// order. Only the LEGACY (type 1) address is retained: it is the messenger v1
+// endpoint, while type 2 is the msgr2 endpoint.
+STATIC
+EFI_STATUS
+CephRbdPlacementDecodeEntityAddr (
+  IN OUT CEPH_WIRE_CURSOR  *Cursor,
+  OUT UINT32               *Ipv4,
+  OUT UINT16               *Port,
+  OUT BOOLEAN              *IsLegacy
+  )
+{
+  EFI_STATUS        Status;
+  CEPH_WIRE_CURSOR  Payload;
+  UINT32            StructLength;
+  UINT32            Type;
+  UINT32            Nonce;
+  UINT32            Elen;
+  UINT16            Family;
+  UINT32            Address;
+  UINT8             Marker;
+  UINT8             PortHigh;
+  UINT8             PortLow;
+
+  *Ipv4 = 0;
+  *Port = 0;
+  *IsLegacy = FALSE;
+
+  Status = CephWireReadU8 (Cursor, &Marker);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if (Marker == 0) {
+    // Legacy addr_after_marker: u8 marker, u16 rest, u32 nonce, sockaddr_storage.
+    Status = CephWireSkip (Cursor, sizeof (UINT16) + sizeof (UINT32) + 128);
+    return Status;
+  }
+
+  if (Marker != 1) {
+    return EFI_UNSUPPORTED;
+  }
+
+  Status = CephRbdPlacementReadEncodeStart (
+             Cursor, PLACEMENT_MAX_OSDMAP_VERSION, &StructLength
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephWireInit (&Payload, Cursor->Data, StructLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephWireReadLe32 (&Payload, &Type);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Payload, &Nonce);  // nonce
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (&Payload, &Elen);
+  }
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if (Elen >= sizeof (UINT16)) {
+    // entity_addr_t::encode() appends ss_family as a 16-bit value (AF_INET
+    // is 2) before the raw sa_data bytes. Read it as u16 directly; reading a
+    // u32 here would leave the port bytes in the upper half of Family and
+    // make the AF_INET comparison fail.
+    Status = CephWireReadLe16 (&Payload, &Family);
+
+    if (!EFI_ERROR (Status) && (Family == 2) && (Elen >= 8)) {
+      // AF_INET: port (2 bytes, network order), IPv4 (4 bytes),
+      // then remaining sa_data padding in sockaddr_in.
+      Status = CephWireReadU8 (&Payload, &PortHigh);
+      if (!EFI_ERROR (Status)) {
+        Status = CephWireReadU8 (&Payload, &PortLow);
+      }
+      if (!EFI_ERROR (Status)) {
+        *Port = (UINT16)((PortHigh << 8) | PortLow);
+        Status = CephWireReadBytes (&Payload, &Address, sizeof (Address));
+      }
+      if (!EFI_ERROR (Status)) {
+        *Ipv4 = Address;  // network byte order
+        // Family(2) + port(2) + IPv4(4) = 8 bytes consumed from Elen.
+        Status = CephWireSkip (&Payload, Elen - 8);
+      }
+    } else if (!EFI_ERROR (Status)) {
+      Status = CephWireSkip (&Payload, Elen - sizeof (UINT16));
+    }
+  }
+
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephWireSkip (Cursor, StructLength);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  *IsLegacy = (Type == CEPH_RBD_ADDR_TYPE_LEGACY);
+  return EFI_SUCCESS;
+}
+
+// Parse the fields between the pools map and the embedded CRUSH blob. This
+// is where OSDMap::encode() places osd_addrs->client_addrs; retaining the
+// messenger-v1 addresses lets the driver connect directly to the primary OSD.
+STATIC
+EFI_STATUS
+CephRbdPlacementDecodeOsdAddrs (
+  IN OUT CEPH_WIRE_CURSOR  *Cursor,
+  OUT CEPH_RBD_PLACEMENT   *Placement
+  )
+{
+  EFI_STATUS  Status;
+  UINT32      Count;
+  UINT32      InnerCount;
+  UINT32      Index;
+  UINT32      OsdIndex;
+  UINT32      StringLength;
+  UINT64      PoolId;
+  UINT8       Marker;
+  UINT32      Ipv4;
+  UINT16      Port;
+  BOOLEAN     IsLegacy;
+
+  // pool_name: map<int64_t, string>.
+  Status = CephWireReadLe32 (Cursor, &Count);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  if (Count > PLACEMENT_MAX_POOLS) {
+    return EFI_UNSUPPORTED;
+  }
+  for (Index = 0; Index < Count; Index++) {
+    Status = CephWireReadLe64 (Cursor, &PoolId);
+    if (!EFI_ERROR (Status)) {
+      Status = CephWireReadLe32 (Cursor, &StringLength);
+    }
+    if (!EFI_ERROR (Status) && (StringLength > Cursor->Remaining)) {
+      return EFI_BAD_BUFFER_SIZE;
+    }
+    if (!EFI_ERROR (Status)) {
+      Status = CephWireSkip (Cursor, StringLength);
+    }
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+  }
+
+  // pool_max, flags, max_osd.
+  Status = CephWireSkip (Cursor, sizeof (UINT32) * 2);
+  if (!EFI_ERROR (Status)) {
+    Status = CephWireReadLe32 (Cursor, &Count);
+  }
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  // osd_state and osd_weight: both vector<u32>.
+  Status = CephWireReadLe32 (Cursor, &InnerCount);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  if (InnerCount > 4096) {
+    return EFI_UNSUPPORTED;
+  }
+  Status = CephWireSkip (Cursor, (UINTN)InnerCount * sizeof (UINT32));
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = CephWireReadLe32 (Cursor, &InnerCount);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  if (InnerCount > 4096) {
+    return EFI_UNSUPPORTED;
+  }
+  Status = CephWireSkip (Cursor, (UINTN)InnerCount * sizeof (UINT32));
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  // client_addrs: vector<entity_addrvec_t>. One entry per OSD; a cluster may
+  // have more OSDs than we can retain, so keep only the first
+  // CEPH_RBD_MAX_OSDS but still walk all entries to keep the cursor aligned.
+  Status = CephWireReadLe32 (Cursor, &Count);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  if (Count > 4096) {
+    return EFI_UNSUPPORTED;
+  }
+
+  Placement->OsdCount = 0;
+  for (Index = 0; Index < Count; Index++) {
+    Status = CephWireReadU8 (Cursor, &Marker);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+    if (Marker != 2) {
+      return EFI_UNSUPPORTED;
+    }
+
+    Status = CephWireReadLe32 (Cursor, &InnerCount);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+    if (InnerCount > 8) {
+      return EFI_UNSUPPORTED;
+    }
+
+    for (OsdIndex = 0; OsdIndex < InnerCount; OsdIndex++) {
+      Status = CephRbdPlacementDecodeEntityAddr (
+                 Cursor, &Ipv4, &Port, &IsLegacy
+                 );
+      if (EFI_ERROR (Status)) {
+        return Status;
+      }
+      if (IsLegacy && (Port != 0) &&
+          (Placement->OsdCount < CEPH_RBD_MAX_OSDS))
+      {
+        Placement->OsdAddr[Placement->OsdCount].OsdId = (INT32)Index;
+        Placement->OsdAddr[Placement->OsdCount].Ipv4 = Ipv4;
+        Placement->OsdAddr[Placement->OsdCount].Port = Port;
+        Placement->OsdAddr[Placement->OsdCount].Valid = TRUE;
+        Placement->OsdCount++;
+      }
+    }
+  }
+
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS
+CephRbdPlacementGetOsdAddress (
+  IN  CONST CEPH_RBD_PLACEMENT  *Placement,
+  IN  INT32                     OsdId,
+  OUT UINT32                    *Ipv4,
+  OUT UINT16                    *Port
+  )
+{
+  UINT32  Index;
+
+  if ((Placement == NULL) || (Ipv4 == NULL) || (Port == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  for (Index = 0; Index < Placement->OsdCount; Index++) {
+    if (Placement->OsdAddr[Index].Valid &&
+        (Placement->OsdAddr[Index].OsdId == OsdId))
+    {
+      *Ipv4 = Placement->OsdAddr[Index].Ipv4;
+      *Port = Placement->OsdAddr[Index].Port;
+      return EFI_SUCCESS;
+    }
+  }
+
+  return EFI_NOT_FOUND;
+}
+
 EFI_STATUS
 CephRbdPlacementFromOsdMap (
   IN  CONST VOID           *Buffer,
@@ -295,6 +563,7 @@ CephRbdPlacementFromOsdMap (
   UINT32            Index;
   INT32             RawEpoch;
   BOOLEAN           Matched;
+  BOOLEAN           Found;
   CONST UINT8      *Base;
   UINTN             AfterPools;
 
@@ -349,6 +618,7 @@ CephRbdPlacementFromOsdMap (
   }
 
   ZeroMem (&Pool, sizeof (Pool));
+  Found = FALSE;
   for (Index = 0; Index < PoolCount; Index++) {
     Status = CephRbdPlacementDecodePool (
                &Cursor, PoolId, &Pool, &Matched
@@ -358,16 +628,22 @@ CephRbdPlacementFromOsdMap (
     }
 
     if (Matched) {
-      break;
+      Found = TRUE;
     }
   }
 
-  if (!Matched) {
+  if (!Found) {
     return EFI_NOT_FOUND;
   }
 
   Base = (CONST UINT8 *)Buffer;
   AfterPools = (UINTN)(Cursor.Data - Base);
+
+  // The OSD address table lives between the pools map and the CRUSH blob.
+  // Retaining it enables direct-to-OSD routing, but a failure here must not
+  // invalidate the placement map that callers already rely on. The CRUSH
+  // blob is located by magic from AfterPools regardless of this result.
+  CephRbdPlacementDecodeOsdAddrs (&Cursor, Placement);
 
   Status = CephRbdPlacementFindCrushMap (
              Base, BufferLength, AfterPools, &Placement->Crush

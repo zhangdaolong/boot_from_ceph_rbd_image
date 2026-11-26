@@ -85,6 +85,41 @@ TestPlacement (void)
   assert (Placement.PgpNum == 32);
   assert ((Placement.Flags & CEPH_RBD_POOL_FLAG_HASHPSPOOL) != 0);
 
+  // Messenger-v1 OSD client addresses are decoded from the OSDMap and kept
+  // in network byte order. The test cluster has one address per OSD.
+  assert (Placement.OsdCount == 3);
+  {
+    static const struct {
+      INT32     OsdId;
+      uint8_t   Ipv4[4];
+      UINT16    Port;
+    } Expected[] = {
+      { 0, { 192, 168, 122, 89 }, 6803 },
+      { 1, { 192, 168, 122, 89 }, 6811 },
+      { 2, { 192, 168, 122, 89 }, 6819 },
+    };
+    UINTN  K;
+
+    for (K = 0; K < sizeof (Expected) / sizeof (Expected[0]); K++) {
+      UINT32  Ipv4;
+      UINT16  Port;
+      uint8_t Bytes[4];
+
+      assert (CephRbdPlacementGetOsdAddress (
+                &Placement, Expected[K].OsdId, &Ipv4, &Port
+                ) == EFI_SUCCESS);
+      memcpy (Bytes, &Ipv4, sizeof (Bytes));
+      assert (memcmp (Bytes, Expected[K].Ipv4, sizeof (Bytes)) == 0);
+      assert (Port == Expected[K].Port);
+    }
+    assert (CephRbdPlacementGetOsdAddress (
+              &Placement, 99, &Placement.OsdAddr[0].Ipv4,
+              &Placement.OsdAddr[0].Port) == EFI_NOT_FOUND);
+    assert (CephRbdPlacementGetOsdAddress (
+              NULL, 0, &Placement.OsdAddr[0].Ipv4,
+              &Placement.OsdAddr[0].Port) == EFI_INVALID_PARAMETER);
+  }
+
   for (I = 0; I < sizeof (Cases) / sizeof (Cases[0]); I++) {
     assert (CephRbdPlacementMapObject (
               &Placement, Cases[I].Name, strlen (Cases[I].Name),
