@@ -12,9 +12,10 @@
   returns a freshly allocated buffer. The caller passes that buffer to
   gBS->LoadImage(SourceBuffer=...), which needs no partition child handle.
 
-  Only the subset needed for a UEFI ESP is implemented: FAT12/FAT16, 512-byte
-  sectors, short (8.3) directory entries, contiguous and chained clusters.
-  Long file names, FAT32 and writes are out of scope.
+  The subset needed for a UEFI ESP is implemented: FAT12/FAT16/FAT32,
+  512-byte sectors, short (8.3) directory entries, contiguous and chained
+  clusters. FAT32 is used by most modern OS installers for the ESP. Long file
+  names and writes are out of scope.
 **/
 
 #include <Uefi.h>

@@ -90,7 +90,7 @@ against a real Ceph 22 cluster (see B.5):
 - GPT/ESP → UEFI Boot Manager handoff (`CephRbdBootManager.c`): builds an
   HD(GPT)+FilePath device path for the ESP, installs a `Boot####` load option
   and registers it in `BootOrder`, with an optional immediate
-  `LoadImage`/`StartImage` of the loader. A minimal FAT12/16 ESP reader
+  `LoadImage`/`StartImage` of the loader. A minimal FAT12/16/32 ESP reader
   (`CephRbdEspFat.c`) reads `\EFI\BOOT\BOOTX64.EFI` straight from the mapped
   RBD image into a buffer; because the synthetic HD(GPT) device path has no
   partition/FAT child handles when the driver is loaded from the UEFI shell,
@@ -249,7 +249,7 @@ sudo umount /mnt/esp && sudo rbd unmap /dev/rbd0
 | `rbd map ... --id admin --keyring ...` | Map the image to a local block device **only for preparation**. `--id` is the Ceph identity; `--keyring` points at its keyring file. |
 | `sgdisk --zap-all /dev/rbd0` | Remove any existing MBR/GPT so the new table is clean. |
 | `sgdisk --new=1:6144:0 --typecode=1:EF00 /dev/rbd0` | Create partition 1 starting at LBA 6144 through the end (`0`); `EF00` is the EFI System Partition type GUID. The driver's ESP discovery reports `esp_lba=6144-...`. |
-| `mkfs.vfat -F12 -s 1 -n CEPHESP /dev/rbd0p1` | Make a FAT12 filesystem with 1 sector per cluster and volume label `CEPHESP`; the built-in reader supports FAT12/16. For larger ESPs use `-F16`. |
+| `mkfs.vfat -F12 -s 1 -n CEPHESP /dev/rbd0p1` | Make a FAT12 filesystem with 1 sector per cluster and volume label `CEPHESP`; the built-in reader supports FAT12/16/32. For larger ESPs use `-F16` or `-F32`. |
 | `cp CephRbdBootTest.efi .../BOOTX64.EFI` | Place the validation app at the x64 fallback path the firmware reads. Replace it with a real Guest Firmware/OS loader in production. |
 
 For a quick smoke test, `CephRbdBootTest.efi` is built in Stage 4; it only
@@ -585,3 +585,174 @@ The commands in B.3 were executed against the development cluster
 
 All verification artifacts were left in place (no cleanup): local blobs/logs in
 `.verify-doc/`, and on the host `~/verify-stage7.sh` plus `/home/ceph/verify-stage7.log`.
+
+### B.7 Installing a guest OS into an RBD image with virsh, then booting from it
+
+`virsh`/libvirt can be used to **install** an operating system into an RBD
+image, because installing is a *build-time* operation: it needs a host-side
+Ceph client (librados/librbd) only to write the OS into the image. This is the
+same idea as Stage 2, just automated with libvirt's RBD storage pool instead of
+a manual `rbd map`.
+
+> **Crucial distinction — firmware-side boot is NOT librbd boot.**
+> The moment the VM *boots*, the RBD image must be read by the guest firmware
+> (`CephRbdDxe.efi` via TCP4 + CephX + OSD RPC), never by a host-side librbd
+> `qemu` `-drive rbd:` or a libvirt `<disk type='network'>` attached to the
+> guest. The host needs **no** Ceph client, keyring, or RBD storage pool at boot
+> time. Do not leave the libvirt RBD disk attached to the running VM — that
+> would be host-side librbd boot, the exact opposite of this project.
+
+The two phases use different Ceph identities:
+
+| Phase | Identity | Caps | Used by |
+|---|---|---|---|
+| Install (build time) | e.g. `client.libvirt` | `mon 'allow r'`, `osd 'allow rw pool=rbd'` | host libvirt/librados, to write the OS |
+| Boot (run time) | `client.firmware01` | `mon 'allow r'`, `osd 'allow r class-read'` | guest firmware CephRbdDxe, read-only |
+
+#### B.7.1 Install phase — libvirt RBD pool (host-side, build time only)
+
+```bash
+# 1. Create a Ceph identity for libvirt and decode its key (base64).
+ceph auth get-or-create client.libvirt \
+  mon 'allow r' \
+  osd 'allow rw pool=rbd'
+ceph auth print-key client.libvirt        # -> base64 secret, save it
+
+# 2. Define a libvirt secret holding that Ceph key.
+cat > ceph-secret.xml <<'EOF'
+<secret ephemeral='no' private='no'>
+  <usage type='ceph'>
+    <name>client.libvirt secret</name>
+  </usage>
+</secret>
+EOF
+virsh secret-define ceph-secret.xml       # prints the generated UUID
+virsh secret-set-value --secret <UUID> --base64 '<base64 key>'
+
+# 3. Define the RBD storage pool (pool name 'rbd' inside Ceph).
+cat > ceph-pool.xml <<'EOF'
+<pool type='rbd'>
+  <name>ceph-rbd</name>
+  <source>
+    <name>rbd</name>
+    <host name='192.168.122.89' port='6789'/>
+    <auth username='libvirt' type='ceph'>
+      <secret uuid='<UUID from step 2>'/>
+    </auth>
+  </source>
+</pool>
+EOF
+virsh pool-define ceph-pool.xml
+virsh pool-build ceph-rbd
+virsh pool-start ceph-rbd
+virsh pool-autostart ceph-rbd
+
+# 4. Create a volume (this IS an RBD image in Ceph pool 'rbd').
+virsh vol-create-as ceph-rbd guest01-root 20G --format raw
+```
+
+| Command / field | Meaning |
+|---|---|
+| `osd 'allow rw pool=rbd'` | Install needs to write the OS; this key is **host-side only** and must not be embedded in guest firmware. |
+| `<secret ephemeral='no' private='no'>` with `<usage type='ceph'>` | Registers a persistent libvirt secret for CephX. UUID is generated by `secret-define`. |
+| `--secret <UUID> --base64 '<key>'` | Stores the base64 Ceph key in the libvirt secret. |
+| `<pool type='rbd'>` / `<name>rbd</name>` | libvirt pool wrapping the Ceph RADOS pool named `rbd`. `port` may be omitted to use the Ceph default `6789`. |
+| `<auth username='libvirt' type='ceph'><secret uuid=.../>` | Tells libvirt to authenticate with the stored key. |
+| `virsh vol-create-as ceph-rbd guest01-root 20G --format raw` | Creates RBD image `rbd/guest01-root` (20 GiB). Only `raw` is supported by the RBD pool. |
+
+Install the guest from an ISO **into that volume**:
+
+```bash
+virt-install \
+  --name guest01 \
+  --memory 2048 --vcpus 2 \
+  --disk vol=ceph-rbd/guest01-root,bus=virtio \
+  --cdrom /var/lib/libvirt/images/installer.iso \
+  --network network=default \
+  --graphics none --console pty,target_type=serial
+```
+
+`--disk vol=ceph-rbd/guest01-root` uses the RBD image as the install target;
+`librbd` is on the **host**, writing the OS into Ceph. When the installer
+finishes, the OS (including its ESP) lives in the RBD image — but the image was
+written by the host, so at this point the VM is still a normal libvirt guest.
+
+#### B.7.2 Prepare the firmware-side boot path
+
+After installing, make the image bootable the way this firmware expects:
+
+1. Ensure the RBD image has a GPT with an ESP containing the OS loader at
+   `\EFI\BOOT\BOOTX64.EFI` (most UEFI installers already do this). The built-in
+   ESP reader (`CephRbdEspFat.c`) supports FAT12/FAT16/FAT32, so a normal
+   installer-created FAT32 ESP works. If the image is not GPT-formatted, follow
+   Stage 2's GPT/ESP steps and copy the OS loader there.
+2. Build the firmware driver and a `CephRbdConfig` blob for the **read-only**
+   firmware identity (`client.firmware01`, `allow r class-read`) — see
+   Stages 4/5. The host-side `client.libvirt` key must **not** go into this blob.
+3. Copy `CephRbdDxe.efi`, `CephRbdSetVar.efi` (carrying that blob) and a
+   `startup.nsh` that loads the driver onto a small ESP boot disk for the shell:
+   ```text
+   echo MARK_BEGIN
+   CephRbdSetVar.efi
+   load fs0:\CephRbdDxe.efi
+   ```
+
+#### B.7.3 Boot phase — firmware-side, with no librbd (run time)
+
+Create the VM with the network-enabled OVMF (Stage 3) and the ESP boot disk,
+but **do not attach the libvirt RBD disk**:
+
+```bash
+virt-install \
+  --name guest01-fwboot \
+  --memory 2048 --vcpus 2 \
+  --boot loader=/path/to/OVMF_CODE.fd,loader.readonly=yes,\
+loader.type=pflash,nvram.template=/path/to/OVMF_VARS.fd \
+  --disk path=/var/lib/libvirt/images/fw-boot.img,format=raw,bus=virtio \
+  --network network=default \
+  --graphics none --console pty,target_type=serial \
+  --import
+```
+
+The equivalent libvirt domain XML has **no** `<disk type='network'>`
+(no `<source protocol='rbd'>`):
+
+```xml
+<os>
+  <type arch='x86_64' machine='q35'>hvm</type>
+  <loader readonly='yes' type='pflash'>/path/to/OVMF_CODE.fd</loader>
+  <nvram>/var/lib/libvirt/qemu/nvram/guest01_VARS.fd</nvram>
+</os>
+<!-- only the ESP boot disk with CephRbdDxe.efi / startup.nsh -->
+<disk type='file' device='disk'>
+  <driver name='qemu' type='raw'/>
+  <source file='/var/lib/libvirt/images/fw-boot.img'/>
+  <target dev='vda' bus='virtio'/>
+</disk>
+```
+
+| Item | Meaning |
+|---|---|
+| `--boot loader=...,loader.readonly=yes,loader.type=pflash,nvram.template=...` | Use the network-enabled OVMF from Stage 3, not the distro firmware (which lacks NetworkPkg). Check `--boot=?` for all sub-options. |
+| `--disk path=fw-boot.img,...,--import` | Boots from a plain local ESP disk holding the driver + `startup.nsh`. There is no RBD disk in the domain. |
+| **No `<disk type='network'>` / `<source protocol='rbd'>`** | This is the defining rule: an attached RBD disk would be read by host librbd. Firmware-side boot reads RBD itself through `CephRbdDxe.efi`. |
+| `client.firmware01` in `CephRbdConfig` | The firmware authenticates with this read-only identity; the `client.libvirt` install key is not present at boot. |
+
+Start the VM and watch the serial console — the chain is identical to Stage 7:
+
+```bash
+virsh start guest01-fwboot
+virsh console guest01-fwboot
+# expect: CephRbdDxe: monitor ... init status=0x0
+#         CephRbdDxe: image mapped, BlockIo published
+#         CephRbdDxe: BootManager handoff status=Success BootXXXX
+#         CephRbdDxe: FAT loader read status=Success
+#         <the OS loader from the RBD ESP runs>
+```
+
+At this point the host has no Ceph client in the data path: `virsh` only
+provides the virtual machine (CPU, NIC, OVMF, serial console). All RBD I/O is
+performed by the guest firmware. Removing the libvirt RBD storage pool after
+installation does not affect booting — which is the hallmark of firmware-side
+boot. (The pool may be kept around for future re-installations, but nothing in
+the boot path references it.)
