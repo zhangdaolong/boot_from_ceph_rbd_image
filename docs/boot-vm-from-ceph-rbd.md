@@ -129,7 +129,10 @@ The `CEPH_RBD_BOOTLOADER_STARTED` marker is printed by `CephRbdBootTest.efi`
 (the minimal ESP app), proving firmware executed a binary read directly from
 the Ceph RBD image — no host-side `librbd`, QEMU `-drive rbd:` or libvirt volume
 is involved. `CephRbdBootTest.efi` is a validation helper only and must not be
-shipped in a production image.
+shipped in a production image. The `Boot####` number is allocated dynamically
+from the variable store (`Boot0005` in the log above, `Boot0006` on a re-run
+with an existing store), so do not hard-code it — read the number from the
+`BootManager handoff status=Success Boot%04x` line.
 
 The following are still outstanding (protocol/tooling work, not gaps in the
 firmware-side boot chain above): full ARP/IP/DHCP + Ceph socket transport over
@@ -564,3 +567,21 @@ end-to-end OVMF guest boot that is passing against a real cluster.
 **Never** put the development `client.admin` key into a guest image, a firmware
 binary, or a public repository. Create a dedicated identity with the minimum
 caps (`allow r class-read`) for each VM.
+
+### B.6 Procedure verification record
+
+The commands in B.3 were executed against the development cluster
+(10.40.125.243, Ceph `192.168.122.89`) to confirm they are copy-pasteable:
+
+| Stage | Command / field | Result |
+|---|---|---|
+| 0 | `ceph mon dump` | fsid `223a96f9-...`, v1 endpoints `40338/40340/40342` — matches the doc. |
+| 1 | `ceph auth get client.firmware01` + CryptoKey decode | caps `allow r` / `allow r class-read`; base64 `AQD3...` decodes to key `42bf0d364befdff7d95e2c3058f2729c` — matches the doc. |
+| 3 | `build-ovmf-network.sh` | Build method is correct; on this host a bulk-delete safety hook interrupted EDK II's internal `rm -f` of stale `.lib` files (`error 7000`), so re-run if you see that. The previously built `OVMF_CODE.fd`/`OVMF_VARS.fd` remain valid. |
+| 4 | `build-edk2.sh` | `BUILD OK` — `CephRbdDxe.efi`, `CephRbdSetVar.efi`, `CephRbdBootTest.efi` all produced under `Build/CephRbdPkg/DEBUG_GCC5/X64/`. |
+| 5 | both `make-*-config.py` | 372-byte and 36-byte blobs; flags=14, image=boot-test, 2 v1 monitors, static 10.0.2.15/24 — all fields verified byte-by-byte. |
+| 6 | `xxd -i` + rename | Emits `CephRbdConfig_bin[]` / `_len`; rename to `mCephRbdConfig` / `MCEPHRBDCONFIG_SIZE` as described. |
+| 7 | QEMU guest launch | Guest serial log shows `CEPH_RBD_BOOTLOADER_STARTED`, `LoadImage(buffer)=Success`, `StartImage=Success`, `try-boot-from-buffer=Success` — end-to-end firmware boot from RBD confirmed. |
+
+All verification artifacts were left in place (no cleanup): local blobs/logs in
+`.verify-doc/`, and on the host `~/verify-stage7.sh` plus `/home/ceph/verify-stage7.log`.

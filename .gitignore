@@ -21,3 +21,5 @@ keyring
 # Local OVMF guest-validation scratch directory (firmware binaries, vars,
 # config blobs and scripts with host-specific IPs/keys).
 .ovmf-work/
+# Local procedure-verification artifacts (generated blobs, build logs).
+.verify-doc/
