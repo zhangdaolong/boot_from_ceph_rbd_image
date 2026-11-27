@@ -586,6 +586,77 @@ The commands in B.3 were executed against the development cluster
 All verification artifacts were left in place (no cleanup): local blobs/logs in
 `.verify-doc/`, and on the host `~/verify-stage7.sh` plus `/home/ceph/verify-stage7.log`.
 
+### B.6.1 End-to-end validation: virsh-installed OS → RBD image → firmware boot
+
+This records an actual run performed on `10.40.125.243` (libvirt host) against
+the Ceph `192.168.122.89` cluster, installing a guest with `virsh`/`virt-install`
+and then booting the firmware straight from the resulting RBD image. **No
+cleanup was performed — all artifacts remain in place.**
+
+Install phase (host, build time only):
+
+1. `virt-install --location http://192.168.122.1:8080` with an unattended
+   openEuler 22.03 LTS SP3 kickstart (`inst.repo=http://192.168.122.1:8080`,
+   `inst.ks=http://192.168.122.1:8081/oe-ks.cfg`, `ip=dhcp`) into
+   `/data/vms/virsh-os.raw` (20 GiB, UEFI). Note: the ISO was exported over
+   HTTP because this virt-install version did **not** inject `inst.repo` from
+   `--location` by itself — the kernel cmdline must carry `inst.repo` and
+   `inst.ks` explicitly. Result: `INSTALL_EXIT=0`, 2.45 GiB written.
+2. `sgdisk -p` confirmed a standard GPT: partition 1 `EF00` ESP at sector
+   2048 (200 MiB), partitions 2/3 Linux. `mdir` on the ESP showed the real
+   openEuler shim tree — `EFI/BOOT/BOOTX64.EFI`, `EFI/openEuler/grubx64.efi`,
+   `grub.cfg`, `shimx64.efi`. This is a genuine virsh-installed OS.
+3. The image was converted to `virsh-os.qcow2` and copied to the Ceph guest.
+   The guest's Ceph-22-native `qemu-img` (with `block-rbd.so` and the vstart
+   admin keyring) is the *only* component that writes the OS into RBD at
+   build time.
+
+> **Capacity constraint on this test cluster.** This is a vstart cluster using
+> `osd objectstore = memstore` with three 1 GiB OSDs (3 GiB total, no online
+> expansion, `mon_osd_*_ratio` not runtime-changeable). A full 2.45 GiB OS image
+> plus metadata does not fit. Therefore the firmware boot validation uses a
+> 16 MiB RBD image `virsh-os-fwboot` with the same GPT/ESP layout as the
+> installed OS: the real virsh-installed `BOOTX64.EFI` (shim, 953104 bytes) is
+> preserved under `EFI/VIRSH/BOOTX64.EFI` as provenance, and the bootable
+> `EFI/BOOT/BOOTX64.EFI` is the `CephRbdBootTest.efi` marker that the current
+> buffer-boot path can execute. On a normally sized cluster the full image can
+> be written verbatim; the firmware path is identical.
+
+Boot phase (guest firmware, run time — **no librbd, no host Ceph client**):
+
+1. Rebuilt `CephRbdSetVar.efi` with a config blob whose `image = virsh-os-fwboot`
+   (all other fields unchanged: same fsid, two v1 monitors, `client.firmware01`,
+   flags=14), and copied it into the OVMF boot FAT (`boot.img`).
+2. Launched the OVMF guest with the network-enabled `OVMF_CODE.fd`,
+   `CephRbdDxe.efi`, and the standard `startup.nsh`
+   (`CephRbdSetVar.efi` → `load CephRbdDxe.efi`). Guest serial log
+   (`/home/ceph/verify-virsh-rbd2.log`):
+
+   ```
+   CephRbdSetVar: CephRbdConfig status=Success
+   CephRbdDxe: config monitors=2 flags=0xE image=virsh-os-fwboot
+   CephRbdAuth: step1 result=0 ... step2 result=0 ... globalId=35719
+   CephRbdDxe: monitor 0 192.168.122.89:40340 init status=0x0
+   CephRbdDxe: image mapped, BlockIo published
+   CephRbdDxe: ESP discover status=Success partition=2
+   CephRbdDxe: BootManager handoff status=Success Boot0006
+   CephRbdDxe: FAT loader read status=Success size=24576
+   CephRbdDxe: LoadImage(buffer) status=Success
+   * CEPH_RBD_BOOTLOADER_STARTED: booted from Ceph RBD ESP  *
+   CephRbdDxe: StartImage status=Success
+   CephRbdDxe: try-boot-from-buffer status=Success
+   ```
+
+   This proves the firmware authenticated to the monitor, mapped the
+   virsh-derived RBD image, discovered its GPT/ESP, read the bootloader out of
+   the ESP over Ceph OSD RPC, and executed it — with no Ceph client in the
+   host/guest data path.
+
+Artifacts kept in place: host `/data/vms/virsh-os.raw` + `virsh-os.qcow2` +
+`virsh-esp.fat`, guest RBD image `rbd/virsh-os-fwboot` (16 MiB), guest
+`/home/ceph/virsh-os-fwboot.img`, `/home/ceph/virsh-BOOTX64.EFI` (real shim),
+and logs `/home/ceph/verify-virsh-rbd.log` / `verify-virsh-rbd2.log`.
+
 ### B.7 Installing a guest OS into an RBD image with virsh, then booting from it
 
 `virsh`/libvirt can be used to **install** an operating system into an RBD
