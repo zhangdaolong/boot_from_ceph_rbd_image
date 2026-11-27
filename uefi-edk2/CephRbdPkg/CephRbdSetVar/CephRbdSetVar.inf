@@ -1,0 +1,25 @@
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = CephRbdSetVar
+  FILE_GUID                      = C7F1E2D3-4A5B-4C6D-8E9F-0A1B2C3D4E5F
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  CephRbdSetVar.c
+  CephRbdConfigBlob.h
+
+[Packages]
+  MdePkg/MdePkg.dec
+  CephRbdPkg/CephRbdPkg.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiLib
+  UefiRuntimeServicesTableLib
+  BaseMemoryLib
+
+[Guids]
+  gCephRbdConfigGuid
+  gCephRbdNetworkGuid

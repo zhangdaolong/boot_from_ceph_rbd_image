@@ -1,5 +1,6 @@
 #include <Uefi.h>
 #include <Library/BaseMemoryLib.h>
+#include <Library/UefiLib.h>
 #include "CephRbdMessenger.h"
 #include "CephRbdMsgrV1Handshake.h"
 #include "CephRbdTcp4.h"
@@ -26,6 +27,17 @@ CephMsgrV1ValidatePeerAddress (
 
   ExpectedPortHigh = (UINT8)(ExpectedPort >> 8);
   ExpectedPortLow  = (UINT8)ExpectedPort;
+  Print (L"CephMsgrV1: peerAddr port=%d.%d ip=%d.%d.%d.%d "
+         L"expect=%d.%d.%d.%d:%d\n",
+         (INT32)Address[CEPH_MSGR_V1_ENTITY_ADDR_PORT_OFFSET],
+         (INT32)Address[CEPH_MSGR_V1_ENTITY_ADDR_PORT_OFFSET + 1],
+         (INT32)Address[CEPH_MSGR_V1_ENTITY_ADDR_IP_OFFSET],
+         (INT32)Address[CEPH_MSGR_V1_ENTITY_ADDR_IP_OFFSET + 1],
+         (INT32)Address[CEPH_MSGR_V1_ENTITY_ADDR_IP_OFFSET + 2],
+         (INT32)Address[CEPH_MSGR_V1_ENTITY_ADDR_IP_OFFSET + 3],
+         (INT32)ExpectedAddress->Addr[0], (INT32)ExpectedAddress->Addr[1],
+         (INT32)ExpectedAddress->Addr[2], (INT32)ExpectedAddress->Addr[3],
+         (INT32)ExpectedPort);
   if ((Address[CEPH_MSGR_V1_ENTITY_ADDR_PORT_OFFSET] != ExpectedPortHigh) ||
       (Address[CEPH_MSGR_V1_ENTITY_ADDR_PORT_OFFSET + 1] != ExpectedPortLow) ||
       (CompareMem (
@@ -142,6 +154,8 @@ CephMsgrV1SendConnectAndReadReply (
 
   ZeroMem (Negotiation, sizeof (*Negotiation));
   Negotiation->SupportedFeatures = SupportedFeatures;
+  Print (L"CephMsgrV1: sending connect features=0x%llx proto=%d\n",
+         (unsigned long long)SupportedFeatures, (INT32)ProtocolVersion);
 
   Status = CephMsgrEncodeV1Connect (
              SupportedFeatures,
@@ -210,6 +224,15 @@ CephMsgrV1SendConnectAndReadReply (
     Negotiation->AuthorizerReplyLength =
       Negotiation->ConnectReply.AuthorizerLength;
   }
+
+  Print (L"CephMsgrV1: connectReply tag=%d features=0x%llx proto=%d "
+         L"connSeq=%d authLen=%d required=0x%llx\n",
+         (INT32)Negotiation->ConnectReply.Tag,
+         (unsigned long long)Negotiation->ConnectReply.Features,
+         (INT32)Negotiation->ConnectReply.ProtocolVersion,
+         (INT32)Negotiation->ConnectReply.ConnectSequence,
+         (INT32)Negotiation->ConnectReply.AuthorizerLength,
+         (unsigned long long)RequiredFeatures);
 
   Status = CephMsgrClassifyV1ConnectReply (
              &Negotiation->ConnectReply,

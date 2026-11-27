@@ -1,15 +1,19 @@
 #include <Uefi.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
+#include <Library/MemoryAllocationLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiRuntimeServicesTableLib.h>
+#include <Library/UefiLib.h>
 #include <Protocol/BlockIo.h>
 #include <Protocol/DriverBinding.h>
+#include <Protocol/Tcp4.h>
 #include "CephRbdAuth.h"
 #include "CephRbdBlockIo.h"
 #include "CephRbdBootManager.h"
 #include "CephRbdConfig.h"
 #include "CephRbdDxe.h"
+#include "CephRbdEspFat.h"
 #include "CephRbdGpt.h"
 #include "CephRbdNetwork.h"
 #include "CephRbdSecretResolver.h"
@@ -375,13 +379,36 @@ CephRbdDriverBindingSupported (
   )
 {
   CEPH_RBD_CONFIG  Config;
+  EFI_STATUS       Status;
 
   if ((This == NULL) || (ControllerHandle == NULL)) {
     return EFI_INVALID_PARAMETER;
   }
 
   (VOID)RemainingDevicePath;
-  if (EFI_ERROR (CephRbdConfigLoad (&Config))) {
+
+  // Bind only to a controller that exposes the TCP4 service binding, i.e. a
+  // configured network device. Accepting arbitrary handles makes the DXE
+  // dispatcher bind to non-network controllers first, where the TCP4 open in
+  // Start() fails and (because this driver is a singleton) never retries on
+  // the real network handle. Host stubs do not model TCP4 controller handles,
+  // so this check is firmware-only.
+#ifndef CEPH_RBD_CONFIG_HOST_TEST
+  Status = gBS->OpenProtocol (
+                  ControllerHandle,
+                  &gEfiTcp4ServiceBindingProtocolGuid,
+                  NULL,
+                  This->DriverBindingHandle,
+                  ControllerHandle,
+                  EFI_OPEN_PROTOCOL_TEST_PROTOCOL
+                  );
+  if (EFI_ERROR (Status)) {
+    return EFI_UNSUPPORTED;
+  }
+#endif
+
+  Status = CephRbdConfigLoad (&Config);
+  if (EFI_ERROR (Status)) {
     return EFI_UNSUPPORTED;
   }
 
@@ -425,6 +452,65 @@ CephRbdDxeReadLba (
            );
 }
 
+// Load and start \EFI\BOOT\BOOTX64.EFI directly from an allocated buffer.
+// Using SourceBuffer rather than the synthetic HD(GPT) device path makes the
+// immediate boot self-contained: no partition/FAT child handles are required
+// (those are absent when the driver is loaded from the UEFI shell).
+STATIC
+EFI_STATUS
+CephRbdDxeTryBootFromBuffer (
+  IN OUT CEPH_RBD_DRIVER  *Driver,
+  IN     EFI_HANDLE        ParentImageHandle,
+  IN     UINT64            EspStartLba
+  )
+{
+  EFI_STATUS                Status;
+  VOID                      *Loader;
+  UINTN                     LoaderSize;
+  EFI_HANDLE                ImageHandle;
+  CEPH_RBD_DXE_GPT_CONTEXT  GptCtx;
+
+  Loader = NULL;
+  LoaderSize = 0;
+  ImageHandle = NULL;
+
+  GptCtx.Pool = &Driver->OsdPool;
+  GptCtx.Device = &Driver->Device;
+  Status = CephRbdEspFatLoadBootloader (
+             CephRbdDxeReadLba,
+             (VOID *)&GptCtx,
+             EspStartLba,
+             &Loader,
+             &LoaderSize
+             );
+  Print (L"CephRbdDxe: FAT loader read status=%r size=%d\n",
+         Status, (INT32)LoaderSize);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = gBS->LoadImage (
+                  FALSE,
+                  ParentImageHandle,
+                  NULL,
+                  Loader,
+                  LoaderSize,
+                  &ImageHandle
+                  );
+  Print (L"CephRbdDxe: LoadImage(buffer) status=%r\n", Status);
+  if (EFI_ERROR (Status)) {
+    FreePool (Loader);
+    return Status;
+  }
+
+  // The loader is now independent of the source buffer.
+  FreePool (Loader);
+
+  Status = gBS->StartImage (ImageHandle, NULL, NULL);
+  Print (L"CephRbdDxe: StartImage status=%r\n", Status);
+  return Status;
+}
+
 // Discover the ESP on the freshly mapped image and register a Boot#### load
 // option for its x64 fallback loader. When TryBoot is TRUE the loader is also
 // handed to LoadImage()/StartImage() immediately. Failure to find an ESP or
@@ -454,11 +540,16 @@ CephRbdDxeBootstrapHandoff (
     return Status;
   }
 
+  Print (L"CephRbdDxe: boot handoff start, lastLba=%llu\n",
+         (unsigned long long)LastLba);
+
   GptCtx.Pool = &Driver->OsdPool;
   GptCtx.Device = &Driver->Device;
   Status = CephRbdGptDiscoverEsp (
              CephRbdDxeReadLba, &GptCtx, LastLba, &Esp, &PartitionNumber
              );
+  Print (L"CephRbdDxe: ESP discover status=%r partition=%d\n",
+         Status, (INT32)PartitionNumber);
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_WARN,
             "CephRbdDxe: ESP discovery failed with %d (non-fatal)\n",
@@ -469,18 +560,26 @@ CephRbdDxeBootstrapHandoff (
 
   Status = CephRbdBootManagerGetEfiBackend (&Backend);
   if (EFI_ERROR (Status)) {
+    Print (L"CephRbdDxe: BootManager backend status=%r\n", Status);
     return Status;
   }
 
+  // Always register the load option without attempting the device-path boot.
+  // The synthetic HD(GPT) path only resolves when the platform partition/FAT
+  // drivers have created child handles for this disk, which does not happen
+  // for a driver loaded from the UEFI shell. Immediate boot, when requested,
+  // is done separately from an in-memory buffer below.
   Status = CephRbdBootManagerHandoff (
              &Backend,
              &Esp,
              PartitionNumber,
              CEPH_RBD_BM_AUTO_BOOT_INDEX,
-             TryBoot,
+             FALSE,
              ParentImageHandle,
              &BootIndex
              );
+  Print (L"CephRbdDxe: BootManager handoff status=%r Boot%04x\n",
+         Status, BootIndex);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -489,6 +588,24 @@ CephRbdDxeBootstrapHandoff (
           "CephRbdDxe: registered Boot%04x for Ceph RBD ESP (partition %u)\n",
           BootIndex, PartitionNumber
           ));
+  Print (L"CephRbdDxe: registered Boot%04x for Ceph RBD ESP (partition %d)\n",
+         BootIndex, (INT32)PartitionNumber);
+
+  if (TryBoot) {
+    // Read the loader directly from the ESP sectors and start it from a
+    // buffer; this needs no partition child handle and proves the firmware
+    // can execute a binary read straight off the Ceph RBD image.
+    Status = CephRbdDxeTryBootFromBuffer (
+               Driver,
+               ParentImageHandle,
+               Esp.FirstLba
+               );
+    Print (L"CephRbdDxe: try-boot-from-buffer status=%r\n", Status);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+  }
+
   return EFI_SUCCESS;
 }
 
@@ -519,10 +636,34 @@ CephRbdDriverBindingStart (
   }
 
   (VOID)RemainingDevicePath;
+
+  // The driver is a singleton: CephRbdDriverInitialize() ZeroMem()s the one
+  // static instance and InstallProtocolInterface() stores a pointer into it,
+  // not a copy. A second Start() on the same controller (the DXE dispatcher
+  // re-drives Start() after the shell-loaded image installs DriverBinding,
+  // bypassing the entry-point helper's driver-model bookkeeping) would wipe
+  // the published BlockIo interface and make the handle disappear from
+  // `dh -p BlockIo`. Treat a repeated Start() on the ready device as a
+  // no-op success; refuse to bind a second controller to the singleton.
+  if ((mCephRbdDriver.Signature == CEPH_RBD_DRIVER_SIGNATURE) &&
+      (mCephRbdDriver.State == CephRbdStateDeviceReady))
+  {
+    Print (L"CephRbdDxe: Start() already ready on %p (skip)\n",
+           mCephRbdDriver.ConnectConfig.ControllerHandle);
+    if (mCephRbdDriver.ConnectConfig.ControllerHandle == ControllerHandle) {
+      return EFI_SUCCESS;
+    }
+    return EFI_ALREADY_STARTED;
+  }
+
+  Print (L"CephRbdDxe: Start() controller=%p\n", ControllerHandle);
   Status = CephRbdConfigLoad (&Config);
   if (EFI_ERROR (Status)) {
+    Print (L"CephRbdDxe: config load failed %r\n", Status);
     return Status;
   }
+  Print (L"CephRbdDxe: config monitors=%d flags=0x%x image=%a\n",
+         Config.MonitorCount, Config.Flags, Config.ImageName);
 
   // Resolve the local IPv4 configuration. An absent or DHCP-mode variable
   // resolves UseDefaultAddress TRUE so the TCP4 layer uses platform DHCP.
@@ -533,8 +674,13 @@ CephRbdDriverBindingStart (
     Status = CephRbdNetworkResolveLocalIp (&NetworkConfig, &LocalIp);
   }
   if (EFI_ERROR (Status)) {
+    Print (L"CephRbdDxe: network resolve failed %r\n", Status);
     return Status;
   }
+  Print (L"CephRbdDxe: local IP default=%d station=%d.%d.%d.%d\n",
+         LocalIp.UseDefaultAddress,
+         LocalIp.StationAddress.Addr[0], LocalIp.StationAddress.Addr[1],
+         LocalIp.StationAddress.Addr[2], LocalIp.StationAddress.Addr[3]);
 
   // Resolve the CephX secret. Raw key bytes are used directly; a KEY_REFERENCE
   // is passed through the platform secret resolver to obtain the raw key.
@@ -582,7 +728,13 @@ CephRbdDriverBindingStart (
     ConnectConfig.ControllerHandle = ControllerHandle;
     ConnectConfig.RemoteAddress = Config.Monitors[Index].Address;
     ConnectConfig.RemotePort = Config.Monitors[Index].Port;
-    ConnectConfig.SupportedFeatures = 0x0F;
+    // Advertise the full messenger-v1 feature set. Ceph 22 monitors require
+    // CEPH_FEATURE_MSG_AUTH (and CEPHX_V2) when cephx signatures are enabled;
+    // advertising only 0x0F makes the monitor reply CEPH_MSGR_TAG_FEATURES and
+    // reject the connection. The effective session features are the
+    // intersection with the monitor reply, so the footer/frame layout stays
+    // exactly what the peer negotiates (legacy 13-byte footer here).
+    ConnectConfig.SupportedFeatures = 0xFFFFFFFFFFFFFFFFULL;
     ConnectConfig.RequiredFeatures = 0;
     ConnectConfig.HostType = CEPH_MSGR_CONNECT_HOST_CLIENT;
     ConnectConfig.ProtocolVersion = 15;  // CEPH_MONC_PROTOCOL
@@ -609,14 +761,55 @@ CephRbdDriverBindingStart (
                Secret,
                SecretLength
                );
+    Print (L"CephRbdDxe: monitor %d %d.%d.%d.%d:%d init status=0x%llx\n",
+           (INT32)Index,
+           Config.Monitors[Index].Address.Addr[0],
+           Config.Monitors[Index].Address.Addr[1],
+           Config.Monitors[Index].Address.Addr[2],
+           Config.Monitors[Index].Address.Addr[3],
+           Config.Monitors[Index].Port,
+           (unsigned long long)Status);
     if (!EFI_ERROR (Status)) {
+      Print (L"CephRbdDxe: image mapped, BlockIo published\n");
+#ifndef CEPH_RBD_CONFIG_HOST_TEST
+      // Self-check: enumerate BlockIo handles from inside the driver. The
+      // UEFI shell can stall after loading a driver that installs a new
+      // DriverBinding (BDS ConnectAll), so a shell-side `dh -p BlockIo` is
+      // not a reliable probe here. Confirming the handle database directly
+      // proves the published device is visible to the rest of firmware.
+      {
+        EFI_HANDLE  *BlockHandles;
+        UINTN        BlockCount;
+
+        BlockHandles = NULL;
+        BlockCount = 0;
+        Status = gBS->LocateHandleBuffer (
+                        ByProtocol,
+                        &gEfiBlockIoProtocolGuid,
+                        NULL,
+                        &BlockCount,
+                        &BlockHandles
+                        );
+        if (!EFI_ERROR (Status)) {
+          Print (L"CephRbdDxe: BlockIo handle count=%d (self-check)\n",
+                 (INT32)BlockCount);
+          gBS->FreePool (BlockHandles);
+        } else {
+          Print (L"CephRbdDxe: BlockIo enumerate failed %r\n", Status);
+        }
+        Status = EFI_SUCCESS;
+      }
+#endif
       // With the BlockIo device published, optionally drive the GPT/ESP ->
       // UEFI Boot Manager handoff. This is intentionally best-effort: the
       // mapped read-only disk is still useful without an ESP.
 #ifndef CEPH_RBD_CONFIG_HOST_TEST
+      Print (L"CephRbdDxe: BM flag check flags=0x%x\n", Config.Flags);
       if ((Config.Flags & CEPH_RBD_CONFIG_FLAG_BOOT_MANAGER) != 0) {
         EFI_STATUS  HandoffStatus;
 
+        Print (L"CephRbdDxe: invoking boot manager handoff tryBoot=%d\n",
+               (INT32)((Config.Flags & CEPH_RBD_CONFIG_FLAG_TRY_BOOT) != 0));
         HandoffStatus = CephRbdDxeBootstrapHandoff (
                           &mCephRbdDriver,
                           This->ImageHandle,
@@ -680,6 +873,64 @@ CephRbdDriverBindingStop (
   return CephRbdDriverShutdown (&mCephRbdDriver);
 }
 
+#ifndef CEPH_RBD_CONFIG_HOST_TEST
+
+// The DXE image handle has no TCP4 service binding, so a driver loaded from
+// the UEFI shell cannot start on ImageHandle directly: CephRbdTcp4ConnectEx()
+// would fail to open the TCP4 service binding on it. Standard DXE connect
+// semantics do not cover a shell-loaded image either. Locate a configured
+// network controller explicitly and start the singleton driver on it. Each
+// candidate that fails is shut down before the next one is tried.
+STATIC
+EFI_STATUS
+CephRbdDxeStartOnNetworkController (
+  IN EFI_DRIVER_BINDING_PROTOCOL  *Binding
+  )
+{
+  EFI_HANDLE  *Handles;
+  UINTN       HandleCount;
+  EFI_STATUS  Status;
+  UINTN       Index;
+
+  Handles = NULL;
+  HandleCount = 0;
+  Status = gBS->LocateHandleBuffer (
+                  ByProtocol,
+                  &gEfiTcp4ServiceBindingProtocolGuid,
+                  NULL,
+                  &HandleCount,
+                  &Handles
+                  );
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_WARN,
+            "CephRbdDxe: cannot locate TCP4 controller: %d\n",
+            (INT32)Status
+            ));
+    return Status;
+  }
+
+  if (HandleCount == 0) {
+    return EFI_NOT_FOUND;
+  }
+
+  for (Index = 0; Index < HandleCount; Index++) {
+    Status = CephRbdDriverBindingStart (Binding, Handles[Index], NULL);
+    if (!EFI_ERROR (Status)) {
+      gBS->FreePool (Handles);
+      return EFI_SUCCESS;
+    }
+    DEBUG ((DEBUG_WARN,
+            "CephRbdDxe: Start on TCP4 controller %u failed: %d\n",
+            (UINT32)Index, (INT32)Status
+            ));
+  }
+
+  gBS->FreePool (Handles);
+  return EFI_DEVICE_ERROR;
+}
+
+#endif  // !CEPH_RBD_CONFIG_HOST_TEST
+
 EFI_STATUS
 EFIAPI
 CephRbdDxeEntryPoint (
@@ -692,6 +943,7 @@ CephRbdDxeEntryPoint (
   CEPH_RBD_CONFIG  Config;
 
   (VOID)SystemTable;
+  Print (L"CephRbdDxe: entry point\n");
   DEBUG ((DEBUG_INFO,
           "CephRbdDxe: firmware-side Ceph RBD boot driver\n"));
 
@@ -718,11 +970,12 @@ CephRbdDxeEntryPoint (
       !EFI_ERROR (CephRbdConfigLoad (&Config)) &&
       ((Config.Flags & CEPH_RBD_CONFIG_FLAG_START_ON_ENTRY) != 0))
   {
-    Status = CephRbdDriverBindingStart (
-               &mCephRbdDriverBinding,
-               ImageHandle,
-               NULL
-               );
+#ifndef CEPH_RBD_CONFIG_HOST_TEST
+    Status = CephRbdDxeStartOnNetworkController (&mCephRbdDriverBinding);
+#else
+    // Host stubs do not model a TCP4 controller handle.
+    Status = EFI_UNSUPPORTED;
+#endif
     if (EFI_ERROR (Status)) {
       DEBUG ((DEBUG_ERROR,
               "CephRbdDxe: entry-point mapping failed with %d\n",

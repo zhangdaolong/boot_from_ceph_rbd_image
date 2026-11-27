@@ -25,7 +25,7 @@ config    <build dir>/ceph.conf
 > `6789` for messenger v1 and `3300` for messenger v2.
 
 
-## Firmware-side boot from RBD (this project, in progress)
+## Firmware-side boot from RBD (this project)
 
 ### B.1 Intended boot chain
 
@@ -90,7 +90,11 @@ against a real Ceph 22 cluster (see B.5):
 - GPT/ESP → UEFI Boot Manager handoff (`CephRbdBootManager.c`): builds an
   HD(GPT)+FilePath device path for the ESP, installs a `Boot####` load option
   and registers it in `BootOrder`, with an optional immediate
-  `LoadImage`/`StartImage` of the loader.
+  `LoadImage`/`StartImage` of the loader. A minimal FAT12/16 ESP reader
+  (`CephRbdEspFat.c`) reads `\EFI\BOOT\BOOTX64.EFI` straight from the mapped
+  RBD image into a buffer; because the synthetic HD(GPT) device path has no
+  partition/FAT child handles when the driver is loaded from the UEFI shell,
+  TRY_BOOT loads the buffer directly with `LoadImage`/`StartImage`.
 - DHCP/static local IPv4 configuration (`CephRbdNetwork.c`): by default the
   platform (OVMF) DHCP auto-config is used; a `CephRbdNetworkConfig` UEFI
   variable can supply a static station address/subnet mask.
@@ -100,12 +104,36 @@ against a real Ceph 22 cluster (see B.5):
 - Legacy BIOS PXE/UNDI (`!PXE` ROM discovery and raw Ethernet frame I/O) in
   `bios/stage2/pxe_undi.c`.
 
-The following is **still missing**, so guest-level boot is not yet validated:
+### B.2.1 End-to-end OVMF guest boot — validated
 
-- End-to-end OVMF guest boot from a Ceph RBD image (host/live tests and the
-  EDK II build pass, but an actual guest has not been booted from RBD on the
-  test cluster). Full ARP/IP/DHCP + Ceph socket transport over BIOS UNDI, and
-  AES-256 live cluster validation, are also outstanding.
+The complete firmware-side chain has been exercised in an OVMF guest on the
+test cluster (10.40.125.243, Ceph `192.168.122.89`). A network-enabled OVMF
+(`scripts/build-ovmf-network.sh`, because the distro `OVMF_CODE.fd` omits
+NetworkPkg) loads `CephRbdDxe.efi` from the shell; the driver authenticates to
+the monitor, maps the `boot-test` RBD image, discovers its GPT/ESP, registers
+`Boot0005`, reads `\EFI\BOOT\BOOTX64.EFI` from the ESP into a buffer and starts
+it. The guest serial log confirms every step:
+
+```text
+CephRbdDxe: monitor 0 192.168.122.89:40340 init status=0x0
+CephRbdDxe: image mapped, BlockIo published
+CephRbdDxe: BootManager handoff status=Success Boot0005
+CephRbdDxe: FAT loader read status=Success size=24576
+CephRbdDxe: LoadImage(buffer) status=Success
+* CEPH_RBD_BOOTLOADER_STARTED: booted from Ceph RBD ESP  *
+CephRbdDxe: StartImage status=Success
+CephRbdDxe: try-boot-from-buffer status=%r
+```
+
+The `CEPH_RBD_BOOTLOADER_STARTED` marker is printed by `CephRbdBootTest.efi`
+(the minimal ESP app), proving firmware executed a binary read directly from
+the Ceph RBD image — no host-side `librbd`, QEMU `-drive rbd:` or libvirt volume
+is involved. `CephRbdBootTest.efi` is a validation helper only and must not be
+shipped in a production image.
+
+The following are still outstanding (protocol/tooling work, not gaps in the
+firmware-side boot chain above): full ARP/IP/DHCP + Ceph socket transport over
+BIOS UNDI, and AES-256 live cluster validation.
 
 See [`IMPLEMENTATION_STATUS.md`](../uefi-edk2/IMPLEMENTATION_STATUS.md) for the
 per-area table and [`firmware-rbd-protocol.md`](firmware-rbd-protocol.md) for the
@@ -259,8 +287,8 @@ CEPH_RBD_TEST_IMAGE=gpt-test tests/live/.build/live_probe 40338 \
 Track implementation progress in
 [`IMPLEMENTATION_STATUS.md`](../uefi-edk2/IMPLEMENTATION_STATUS.md). The guide
 above documents the intended configuration so the pieces can be validated
-incrementally, and B.5 shows the live-protocol validation that is already
-passing against a real cluster.
+incrementally, B.5 shows the live-protocol validation, and B.2.1 records the
+end-to-end OVMF guest boot that is passing against a real cluster.
 
 **Never** put the development `client.admin` key into a guest image, a firmware
 binary, or a public repository. Create a dedicated identity with the minimum

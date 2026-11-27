@@ -17,3 +17,7 @@ keyring
 # Editor/backup files
 *~
 *.swp
+
+# Local OVMF guest-validation scratch directory (firmware binaries, vars,
+# config blobs and scripts with host-specific IPs/keys).
+.ovmf-work/

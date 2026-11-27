@@ -75,6 +75,9 @@ static EFI_STATUS EFIAPI FakeCancel(
   EFI_TCP4_PROTOCOL *This,
   EFI_TCP4_COMPLETION_TOKEN *Token
   );
+static EFI_STATUS EFIAPI FakePoll(
+  EFI_TCP4_PROTOCOL *This
+  );
 
 static EFI_SERVICE_BINDING_PROTOCOL mServiceBinding = {
   FakeCreateChild,
@@ -87,7 +90,8 @@ static EFI_TCP4_PROTOCOL mTcp4 = {
   FakeTransmit,
   FakeReceive,
   FakeClose,
-  FakeCancel
+  FakeCancel,
+  FakePoll
 };
 
 static EFI_STATUS EFIAPI FakeCreateEvent(
@@ -305,6 +309,17 @@ FakeCancel(EFI_TCP4_PROTOCOL *This, EFI_TCP4_COMPLETION_TOKEN *Token)
   assert(This == &mTcp4);
   (void)Token;
   return EFI_NOT_FOUND;
+}
+
+// The host TCP4 mocks signal completion tokens synchronously inside
+// FakeConnect/FakeTransmit/FakeReceive/FakeClose, so IsDone is already TRUE
+// by the time CephRbdTcp4WaitForCompletion() runs and Poll() is never
+// actually invoked here. Provide it so the protocol struct matches firmware.
+static EFI_STATUS EFIAPI
+FakePoll(EFI_TCP4_PROTOCOL *This)
+{
+  assert(This == &mTcp4);
+  return EFI_SUCCESS;
 }
 
 static EFI_STATUS EFIAPI

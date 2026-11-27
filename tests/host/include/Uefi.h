@@ -57,6 +57,7 @@ typedef VOID (EFIAPI *EFI_EVENT_NOTIFY)(EFI_EVENT Event, VOID *Context);
 #define EFI_ACCESS_DENIED (-8)
 #define EFI_OUT_OF_RESOURCES (-9)
 #define EFI_NOT_STARTED (-10)
+#define EFI_ALREADY_STARTED (-18)
 #define EFI_TIMEOUT (-11)
 #define EFI_NOT_FOUND (-12)
 #define EFI_DEVICE_ERROR (-13)

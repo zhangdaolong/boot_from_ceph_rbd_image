@@ -1,5 +1,6 @@
 #include <Uefi.h>
 #include <Library/BaseMemoryLib.h>
+#include <Library/UefiLib.h>
 #include "CephRbdAuth.h"
 #include "CephRbdRpc.h"
 #include "CephRbdWire.h"
@@ -383,9 +384,14 @@ CephRbdAuthHandshake (
 
   Status = CephRbdAuthDecodeReply (Reply, ReplyLength, &AuthReply);
   if (EFI_ERROR (Status)) {
+    Print (L"CephRbdAuth: step1 decode failed %r replyLen=%d\n",
+           Status, (INT32)ReplyLength);
     return Status;
   }
 
+  Print (L"CephRbdAuth: step1 result=%d replyLen=%d resultBlLen=%d\n",
+         (INT32)AuthReply.Result, (INT32)ReplyLength,
+         (INT32)AuthReply.ResultBlLength);
   if (AuthReply.Result != 0) {
     return EFI_ACCESS_DENIED;
   }
@@ -397,8 +403,12 @@ CephRbdAuthHandshake (
              &Challenge
              );
   if (EFI_ERROR (Status)) {
+    Print (L"CephRbdAuth: challenge decode failed %r\n", Status);
     return Status;
   }
+
+  Print (L"CephRbdAuth: serverChallenge=0x%llx\n",
+         (unsigned long long)Challenge.ServerChallenge);
 
   // Use a deterministic, nonzero client challenge. A firmware client has no
   // CSPRNG; the challenge is a nonce, and replay protection comes from the
@@ -450,9 +460,15 @@ CephRbdAuthHandshake (
 
   Status = CephRbdAuthDecodeReply (Reply, ReplyLength, &AuthReply);
   if (EFI_ERROR (Status)) {
+    Print (L"CephRbdAuth: step2 decode failed %r replyLen=%d\n",
+           Status, (INT32)ReplyLength);
     return Status;
   }
 
+  Print (L"CephRbdAuth: step2 result=%d replyLen=%d resultBlLen=%d "
+         L"globalId=%d\n",
+         (INT32)AuthReply.Result, (INT32)ReplyLength,
+         (INT32)AuthReply.ResultBlLength, (INT32)AuthReply.GlobalId);
   // A zero result means CephxServiceHandler::handle_request returned 1 and the
   // monitor called ms_handle_fast_authentication(), marking the session
   // authenticated. All subsequent MON/OSD RPCs are now accepted.

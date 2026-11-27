@@ -8,6 +8,16 @@
 
 #define CEPH_RBD_TCP4_TIMEOUT_TICKS_PER_SECOND  10000000ULL
 
+// EFI_TCP4 completion tokens require an EVT_NOTIFY_SIGNAL event. Such an
+// event cannot be passed to gBS->WaitForEvent() (CoreCheckEvent rejects
+// EVT_NOTIFY_SIGNAL with EFI_INVALID_PARAMETER). Instead the notification
+// function flips a per-operation flag and the caller drives the TCP state
+// machine with Tcp4->Poll() until the flag is set or a timer expires. This is
+// the same pattern used by EDK II's own NetworkPkg (e.g. HttpDxe).
+typedef struct {
+  BOOLEAN  IsDone;
+} CEPH_RBD_TCP4_COMPLETION_CONTEXT;
+
 STATIC
 VOID
 EFIAPI
@@ -16,8 +26,13 @@ CephRbdTcp4EventNotify (
   IN VOID       *Context
   )
 {
+  CEPH_RBD_TCP4_COMPLETION_CONTEXT  *Completion;
+
   (VOID)Event;
-  (VOID)Context;
+  if (Context != NULL) {
+    Completion = (CEPH_RBD_TCP4_COMPLETION_CONTEXT *)Context;
+    Completion->IsDone = TRUE;
+  }
 }
 
 STATIC
@@ -62,7 +77,8 @@ CephRbdTcp4CreateTimeoutEvent (
 STATIC
 EFI_STATUS
 CephRbdTcp4CreateCompletionEvent (
-  OUT EFI_EVENT  *Event
+  OUT EFI_EVENT  *Event,
+  IN  VOID       *Context
   )
 {
   if (Event == NULL) {
@@ -73,7 +89,7 @@ CephRbdTcp4CreateCompletionEvent (
                 EVT_NOTIFY_SIGNAL,
                 TPL_CALLBACK,
                 CephRbdTcp4EventNotify,
-                NULL,
+                Context,
                 Event
                 );
 }
@@ -81,77 +97,41 @@ CephRbdTcp4CreateCompletionEvent (
 STATIC
 EFI_STATUS
 CephRbdTcp4WaitForCompletion (
-  IN EFI_TCP4_PROTOCOL          *Tcp4,
-  IN EFI_TCP4_COMPLETION_TOKEN  *Token,
-  IN UINT32                     TimeoutSeconds
+  IN EFI_TCP4_PROTOCOL               *Tcp4,
+  IN EFI_TCP4_COMPLETION_TOKEN       *Token,
+  IN UINT32                          TimeoutSeconds,
+  IN CEPH_RBD_TCP4_COMPLETION_CONTEXT *Context
   )
 {
   EFI_STATUS  Status;
-  EFI_STATUS  CancelStatus;
   EFI_EVENT   TimeoutEvent;
-  EFI_EVENT   Events[2];
-  UINTN       EventIndex;
-  EFI_STATUS  TimeoutStatus;
 
-  if ((Tcp4 == NULL) || (Token == NULL) || (Token->Event == NULL)) {
+  if ((Tcp4 == NULL) || (Token == NULL) || (Token->Event == NULL) ||
+      (Context == NULL))
+  {
     return EFI_INVALID_PARAMETER;
   }
 
   Status = CephRbdTcp4CreateTimeoutEvent (TimeoutSeconds, &TimeoutEvent);
   if (EFI_ERROR (Status)) {
-    TimeoutStatus = Status;
-    CancelStatus = Tcp4->Cancel (Tcp4, Token);
-    Events[0] = Token->Event;
-    Status = gBS->WaitForEvent (1, Events, &EventIndex);
-    if (EFI_ERROR (Status)) {
-      return Status;
-    }
-
-    if (CancelStatus == EFI_NOT_FOUND) {
-      return Token->Status;
-    }
-
-    return EFI_ERROR (CancelStatus) ? CancelStatus : TimeoutStatus;
-  }
-
-  Events[0] = Token->Event;
-  Events[1] = TimeoutEvent;
-  Status = gBS->WaitForEvent (2, Events, &EventIndex);
-  if (EFI_ERROR (Status)) {
-    Tcp4->Cancel (Tcp4, Token);
-    Events[0] = Token->Event;
-    gBS->WaitForEvent (1, Events, &EventIndex);
-    gBS->CloseEvent (TimeoutEvent);
     return Status;
   }
 
-  if (EventIndex == 1) {
-    CancelStatus = Tcp4->Cancel (Tcp4, Token);
-    if (CancelStatus == EFI_NOT_FOUND) {
-      Status = gBS->CheckEvent (Token->Event);
-      if (!EFI_ERROR (Status)) {
-        Status = Token->Status;
-        gBS->CloseEvent (TimeoutEvent);
-        return Status;
-      }
+  // Drive the TCP state machine until the completion notification fires or
+  // the timer expires. gBS->WaitForEvent() cannot be used here because the
+  // completion token event is EVT_NOTIFY_SIGNAL (see comment above).
+  while (!Context->IsDone) {
+    if (!EFI_ERROR (gBS->CheckEvent (TimeoutEvent))) {
+      Tcp4->Cancel (Tcp4, Token);
+      gBS->CloseEvent (TimeoutEvent);
+      return EFI_TIMEOUT;
     }
 
-    Events[0] = Token->Event;
-    Status = gBS->WaitForEvent (1, Events, &EventIndex);
-    if (!EFI_ERROR (Status)) {
-      if (CancelStatus == EFI_NOT_FOUND) {
-        Status = Token->Status;
-      } else {
-        Status = EFI_ERROR (CancelStatus) ?
-                 CancelStatus : EFI_TIMEOUT;
-      }
-    }
-  } else {
-    Status = Token->Status;
+    Tcp4->Poll (Tcp4);
   }
 
   gBS->CloseEvent (TimeoutEvent);
-  return Status;
+  return Token->Status;
 }
 
 STATIC
@@ -177,10 +157,11 @@ CephRbdTcp4ConnectEx (
   OUT CEPH_RBD_TCP4_CONNECTION *Connection
   )
 {
-  EFI_STATUS                 Status;
-  EFI_STATUS                 CleanupStatus;
-  EFI_TCP4_CONFIG_DATA       Config;
-  EFI_TCP4_CONNECTION_TOKEN  Token;
+  EFI_STATUS                          Status;
+  EFI_STATUS                          CleanupStatus;
+  EFI_TCP4_CONFIG_DATA                Config;
+  EFI_TCP4_CONNECTION_TOKEN           Token;
+  CEPH_RBD_TCP4_COMPLETION_CONTEXT     CompletionCtx;
 
   if ((ImageHandle == NULL) || (ControllerHandle == NULL) ||
       (RemoteAddress == NULL) || (RemotePort == 0) ||
@@ -270,7 +251,11 @@ CephRbdTcp4ConnectEx (
 
   Connection->Configured = TRUE;
   ZeroMem (&Token, sizeof (Token));
-  Status = CephRbdTcp4CreateCompletionEvent (&Token.CompletionToken.Event);
+  CompletionCtx.IsDone = FALSE;
+  Status = CephRbdTcp4CreateCompletionEvent (
+             &Token.CompletionToken.Event,
+             &CompletionCtx
+             );
   if (EFI_ERROR (Status)) {
     goto Error;
   }
@@ -281,7 +266,8 @@ CephRbdTcp4ConnectEx (
     Status = CephRbdTcp4WaitForCompletion (
                Connection->Tcp4,
                &Token.CompletionToken,
-               TimeoutSeconds
+               TimeoutSeconds,
+               &CompletionCtx
                );
   }
 
@@ -334,9 +320,10 @@ CephRbdTcp4Send (
   IN UINT32                    TimeoutSeconds
   )
 {
-  EFI_STATUS              Status;
-  EFI_TCP4_IO_TOKEN       Token;
-  EFI_TCP4_TRANSMIT_DATA  TxData;
+  EFI_STATUS                          Status;
+  EFI_TCP4_IO_TOKEN                   Token;
+  EFI_TCP4_TRANSMIT_DATA              TxData;
+  CEPH_RBD_TCP4_COMPLETION_CONTEXT    CompletionCtx;
 
   if ((Connection == NULL) || (Buffer == NULL) ||
       (BufferLength == 0) || (BufferLength > MAX_UINT32) ||
@@ -351,7 +338,11 @@ CephRbdTcp4Send (
 
   ZeroMem (&Token, sizeof (Token));
   ZeroMem (&TxData, sizeof (TxData));
-  Status = CephRbdTcp4CreateCompletionEvent (&Token.CompletionToken.Event);
+  CompletionCtx.IsDone = FALSE;
+  Status = CephRbdTcp4CreateCompletionEvent (
+             &Token.CompletionToken.Event,
+             &CompletionCtx
+             );
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -368,7 +359,8 @@ CephRbdTcp4Send (
     Status = CephRbdTcp4WaitForCompletion (
                Connection->Tcp4,
                &Token.CompletionToken,
-               TimeoutSeconds
+               TimeoutSeconds,
+               &CompletionCtx
                );
   }
 
@@ -385,9 +377,10 @@ CephRbdTcp4Receive (
   OUT UINTN                    *ReceivedLength
   )
 {
-  EFI_STATUS            Status;
-  EFI_TCP4_IO_TOKEN     Token;
-  EFI_TCP4_RECEIVE_DATA RxData;
+  EFI_STATUS                          Status;
+  EFI_TCP4_IO_TOKEN                   Token;
+  EFI_TCP4_RECEIVE_DATA               RxData;
+  CEPH_RBD_TCP4_COMPLETION_CONTEXT    CompletionCtx;
 
   if ((Connection == NULL) || (Buffer == NULL) ||
       (BufferCapacity == 0) || (BufferCapacity > MAX_UINT32) ||
@@ -403,7 +396,11 @@ CephRbdTcp4Receive (
 
   ZeroMem (&Token, sizeof (Token));
   ZeroMem (&RxData, sizeof (RxData));
-  Status = CephRbdTcp4CreateCompletionEvent (&Token.CompletionToken.Event);
+  CompletionCtx.IsDone = FALSE;
+  Status = CephRbdTcp4CreateCompletionEvent (
+             &Token.CompletionToken.Event,
+             &CompletionCtx
+             );
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -419,7 +416,8 @@ CephRbdTcp4Receive (
     Status = CephRbdTcp4WaitForCompletion (
                Connection->Tcp4,
                &Token.CompletionToken,
-               TimeoutSeconds
+               TimeoutSeconds,
+               &CompletionCtx
                );
   }
 
@@ -493,9 +491,10 @@ CephRbdTcp4Close (
   IN UINT32                        TimeoutSeconds
   )
 {
-  EFI_STATUS            Status;
-  EFI_STATUS            FirstError;
-  EFI_TCP4_CLOSE_TOKEN  Token;
+  EFI_STATUS                          Status;
+  EFI_STATUS                          FirstError;
+  EFI_TCP4_CLOSE_TOKEN                Token;
+  CEPH_RBD_TCP4_COMPLETION_CONTEXT    CompletionCtx;
 
   if ((Connection == NULL) || (TimeoutSeconds == 0)) {
     return EFI_INVALID_PARAMETER;
@@ -505,14 +504,19 @@ CephRbdTcp4Close (
   if ((Connection->Tcp4 != NULL) && Connection->Connected) {
     ZeroMem (&Token, sizeof (Token));
     Token.AbortOnClose = TRUE;
-    Status = CephRbdTcp4CreateCompletionEvent (&Token.CompletionToken.Event);
+    CompletionCtx.IsDone = FALSE;
+    Status = CephRbdTcp4CreateCompletionEvent (
+               &Token.CompletionToken.Event,
+               &CompletionCtx
+               );
     if (!EFI_ERROR (Status)) {
       Status = Connection->Tcp4->Close (Connection->Tcp4, &Token);
       if (!EFI_ERROR (Status)) {
         Status = CephRbdTcp4WaitForCompletion (
                    Connection->Tcp4,
                    &Token.CompletionToken,
-                   TimeoutSeconds
+                   TimeoutSeconds,
+                   &CompletionCtx
                    );
       }
 

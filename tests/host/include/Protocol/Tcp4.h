@@ -110,6 +110,9 @@ struct _EFI_TCP4_PROTOCOL {
     EFI_TCP4_PROTOCOL *This,
     EFI_TCP4_COMPLETION_TOKEN *Token
     );
+  EFI_STATUS (EFIAPI *Poll)(
+    EFI_TCP4_PROTOCOL *This
+    );
 };
 
 #endif

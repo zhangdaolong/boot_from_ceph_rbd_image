@@ -1,0 +1,18 @@
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = CephRbdBootTest
+  FILE_GUID                      = D4E5F6A7-B8C9-4D0E-9F12-3A4B5C6D7E8F
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  CephRbdBootTest.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  CephRbdPkg/CephRbdPkg.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiLib

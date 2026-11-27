@@ -1,6 +1,7 @@
 #include <Uefi.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
+#include <Library/UefiLib.h>
 #include "CephRbdMsgrV1Recovery.h"
 #include "CephRbdMsgrV1Transport.h"
 
@@ -301,8 +302,15 @@ CephRbdMsgrV1ApplySequences (
              Negotiation
              );
   if (EFI_ERROR (*Status)) {
+    Print (L"CephMsgrV1: handshake failed %r\n", *Status);
     return CephRecoveryFailed;
   }
+
+  Print (L"CephMsgrV1: action=%d tag=%d features=0x%llx authReplyLen=%d\n",
+         (INT32)Negotiation->Action,
+         (INT32)Negotiation->ConnectReply.Tag,
+         (unsigned long long)Negotiation->ConnectReply.Features,
+         (INT32)Negotiation->AuthorizerReplyLength);
 
   switch (Negotiation->Action) {
     case CephMsgrConnectReady:

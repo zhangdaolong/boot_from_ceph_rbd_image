@@ -9,6 +9,8 @@
 [Sources]
   CephRbdDxe.c
   CephRbdDxe.h
+  CephRbdEspFat.c
+  CephRbdEspFat.h
   CephRbdConfig.c
   CephRbdConfig.h
   CephRbdWire.c
